@@ -1,0 +1,27 @@
+"""机器学习评估平台：样本集、预测批次与指标计算基础。
+
+当前范围：对本地提供的分类预测做总体与分组评估。
+训练与在线模型不在范围内。
+"""
+
+from .samples import Sample, SampleSet
+from .predictions import Prediction, PredictionBatch, AlignmentSummary, EvaluableRow
+from .metrics import binary_metrics, multiclass_metrics, confusion_counts
+from .resample import bootstrap_ci
+from .evaluation import GroupReport, evaluate_batch
+
+__all__ = [
+    "Sample",
+    "SampleSet",
+    "PredictionBatch",
+    "AlignmentSummary",
+    "EvaluableRows",
+    "binary_metrics",
+    "multiclass_metrics",
+    "confusion_counts",
+    "bootstrap_ci",
+    "GroupReport",
+    "evaluate_batch",
+]
+
+__version__ = "0.1.0"
