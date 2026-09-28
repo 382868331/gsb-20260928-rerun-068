@@ -1,0 +1,6 @@
+sample_id,y_true,weight,group:region
+s1,A,1,north
+s2,A,1,north
+s3,B,2,south
+s4,B,3,south
+s5,A,4,south
