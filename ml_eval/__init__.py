@@ -8,7 +8,7 @@ from .samples import Sample, SampleSet
 from .predictions import Prediction, PredictionBatch, AlignmentSummary, EvaluableRow
 from .metrics import binary_metrics, multiclass_metrics, confusion_counts
 from .resample import bootstrap_ci
-from .evaluation import GroupReport, evaluate_batch
+from .evaluation import Accounting, GroupReport, evaluate_batch
 
 __all__ = [
     "Sample",
@@ -21,6 +21,7 @@ __all__ = [
     "confusion_counts",
     "bootstrap_ci",
     "GroupReport",
+    "Accounting",
     "evaluate_batch",
 ]
 

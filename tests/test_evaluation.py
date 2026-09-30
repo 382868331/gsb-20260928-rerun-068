@@ -33,7 +33,7 @@ def make_predictions():
         Prediction("s3", "B"),
         Prediction("s4", "A"),  # 错
         Prediction("s5", "A"),
-        Prediction("s5", "B"),  # 重复预测
+        Prediction("s5", "A"),  # 一致重复预测：折叠，不改变结果
         Prediction("s999", "A"),  # 未知样本身份
         Prediction("s7", "Z"),  # 未知类别
     ]
@@ -48,12 +48,101 @@ def test_data_quality_counts_are_kept_separate():
     assert s.n_unknown_sample_ids == 1
     assert s.n_missing_predictions == 1
     assert s.n_unknown_predicted_labels == 1
+    assert s.n_conflicting_samples == 0
     assert s.n_evaluable == 5
     # 难例必须保留在统计里，不能被悄悄删掉：各计数之和自洽
     assert tuple(s.duplicate_sample_ids) == ("s5",)
     assert tuple(s.missing_sample_ids) == ("s6",)
     assert tuple(s.unknown_sample_ids) == ("s999",)
     assert tuple(s.unknown_label_rows) == (("s7", "Z"),)
+
+
+def test_identical_duplicates_fold_order_independently():
+    # 把一致重复放到最前、并整体乱序：指标与版本身份必须完全一致
+    shuffled = list(reversed(make_predictions()))
+    b1 = PredictionBatch(make_predictions(), make_samples(), "b1")
+    b2 = PredictionBatch(shuffled, make_samples(), "b1")
+    assert b1.version == b2.version
+    assert b1.evaluable_rows == b2.evaluable_rows
+    r1 = evaluate_batch(b1, "region", "accuracy", n_replicates=50, seed=7)
+    r2 = evaluate_batch(b2, "region", "accuracy", n_replicates=50, seed=7)
+    assert r2.prediction_batch_version == r1.prediction_batch_version
+    assert r2.participating_version == r1.participating_version
+    assert r2.overall.metrics.accuracy == r1.overall.metrics.accuracy
+    assert [g.to_dict() for g in r2.groups] == [g.to_dict() for g in r1.groups]
+    assert (
+        r2.overall.confidence.replicate_version
+        == r1.overall.confidence.replicate_version
+    )
+
+
+def test_conflicting_duplicates_are_explicitly_excluded():
+    samples = make_samples()
+    # s5 冲突：A 与 B 谁先出现都不能决定成绩
+    preds = [
+        Prediction("s1", "A"),
+        Prediction("s2", "B"),
+        Prediction("s3", "B"),
+        Prediction("s4", "A"),
+        Prediction("s5", "A"),
+        Prediction("s5", "B"),
+        Prediction("s7", "Z"),
+    ]
+    b1 = PredictionBatch(preds, samples, "b1")
+    b2 = PredictionBatch(list(reversed(preds)), samples, "b1")
+    assert b1.version == b2.version
+    for batch in (b1, b2):
+        s = batch.summary
+        assert s.n_duplicate_predictions == 1
+        assert s.n_conflicting_samples == 1
+        assert s.conflicting_rows == (("s5", ("A", "B")),)
+        assert s.total_weight_conflicting == 3.0
+        assert s.duplicate_sample_ids == ("s5",)
+        assert "s5" not in s.evaluable_sample_ids
+        assert len(batch.evaluable_rows) == 4
+    r1 = evaluate_batch(b1, "region", "accuracy", n_replicates=50, seed=7)
+    r2 = evaluate_batch(b2, "region", "accuracy", n_replicates=50, seed=7)
+    assert r1.participating_version == r2.participating_version
+    assert r1.overall.metrics.accuracy == r2.overall.metrics.accuracy
+    # 冲突样本 s5（权重 3）按错误计入全样本口径：正确权重 2 / 总权重 10
+    assert r1.accounting.accuracy_all_samples == pytest.approx(0.2)
+    assert r1.accounting.conflicting_weight == 3.0
+    assert r1.accounting.accuracy_evaluable == pytest.approx(2.0 / 5.0)
+
+
+def test_accounting_counts_all_excluded_weights():
+    report = evaluate_batch(PredictionBatch(make_predictions(), make_samples()))
+    a = report.accounting
+    # 总权重 1+2+1+1+3+1+1 = 10；可评估 8；缺预测 s6=1；未知类别 s7=1
+    assert a.total_weight == pytest.approx(10.0)
+    assert a.evaluable_weight == pytest.approx(8.0)
+    assert a.excluded_weight == pytest.approx(2.0)
+    assert a.missing_weight == pytest.approx(1.0)
+    assert a.unknown_label_weight == pytest.approx(1.0)
+    assert a.conflicting_weight == 0.0
+    assert a.correct_weight == pytest.approx(5.0)
+    assert a.accuracy_all_samples == pytest.approx(0.5)
+    assert a.accuracy_evaluable == pytest.approx(5.0 / 8.0)
+    # 可评估权重 + 被排除权重 = 全部样本权重，账目闭合
+    assert a.evaluable_weight + a.excluded_weight == pytest.approx(a.total_weight)
+
+
+def test_replicate_version_tracks_labels_and_weights():
+    rows = PredictionBatch(make_predictions(), make_samples()).evaluable_rows
+    r1 = bootstrap_ci(rows, "accuracy", n_replicates=50, seed=7)
+    # 同身份同预测但权重不同：重采样版本必须不同
+    reweighted = [
+        type(r)(r.sample_id, r.label, r.predicted, r.weight * 2) for r in rows
+    ]
+    r2 = bootstrap_ci(reweighted, "accuracy", n_replicates=50, seed=7)
+    assert r2.replicate_version != r1.replicate_version
+    # 同身份但翻转某个预测：版本也必须不同
+    flipped = [
+        type(r)(r.sample_id, r.label, "B" if r.label == "A" else "A", r.weight)
+        for r in rows
+    ]
+    r3 = bootstrap_ci(flipped, "accuracy", n_replicates=50, seed=7)
+    assert r3.replicate_version != r1.replicate_version
 
 
 def test_overall_metrics_hand_computed():

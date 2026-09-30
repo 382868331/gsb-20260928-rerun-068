@@ -79,6 +79,9 @@ def bootstrap_ci(
     alpha = (1.0 - confidence_level) / 2.0
     lower = float(np.quantile(values, alpha))
     upper = float(np.quantile(values, 1.0 - alpha))
+    # 重采样版本必须携带完整参与行：身份、真值、预测与权重缺一不可，
+    # 否则同身份但不同预测/权重的数据会得到相同版本，结论无法回溯。
+    rows_sorted = sorted(rows, key=lambda r: r.sample_id)
     replicate_version = content_version(
         [
             (
@@ -88,7 +91,10 @@ def bootstrap_ci(
                     n_replicates,
                     seed,
                     confidence_level,
-                    [r.sample_id for r in rows],
+                    [
+                        [r.sample_id, r.label, r.predicted, r.weight]
+                        for r in rows_sorted
+                    ],
                 ],
             )
         ]

@@ -44,12 +44,47 @@ class GroupReport:
 
 
 @dataclass(frozen=True)
+class Accounting:
+    """全部样本的对账统计，避免剔除异常后只留下更漂亮的指标。
+
+    缺预测、冲突预测、未知预测类别的样本在全样本准确率里一律按错误处理；
+    未知样本身份的预测不对应任何样本，单独计数但不进任何分母。
+    """
+
+    n_samples: int
+    total_weight: float
+    evaluable_weight: float
+    correct_weight: float
+    excluded_weight: float
+    missing_weight: float
+    conflicting_weight: float
+    unknown_label_weight: float
+    accuracy_all_samples: float
+    accuracy_evaluable: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "n_samples": self.n_samples,
+            "total_weight": self.total_weight,
+            "evaluable_weight": self.evaluable_weight,
+            "correct_weight": self.correct_weight,
+            "excluded_weight": self.excluded_weight,
+            "missing_weight": self.missing_weight,
+            "conflicting_weight": self.conflicting_weight,
+            "unknown_label_weight": self.unknown_label_weight,
+            "accuracy_all_samples": self.accuracy_all_samples,
+            "accuracy_evaluable": self.accuracy_evaluable,
+        }
+
+
+@dataclass(frozen=True)
 class EvaluationReport:
     sample_set_version: str
     prediction_batch_version: str
     participating_version: str
     sample_ids: tuple[str, ...]
     data_quality: AlignmentSummary
+    accounting: Accounting
     overall: GroupReport
     groups: tuple[GroupReport, ...]
 
@@ -60,6 +95,7 @@ class EvaluationReport:
             "participating_version": self.participating_version,
             "sample_ids": list(self.sample_ids),
             "data_quality": self.data_quality.to_dict(),
+            "accounting": self.accounting.to_dict(),
             "overall": self.overall.to_dict(),
             "groups": [g.to_dict() for g in self.groups],
         }
@@ -75,6 +111,7 @@ def evaluate_batch(
 ) -> EvaluationReport:
     rows = batch.evaluable_rows
     sample_set: SampleSet = batch.sample_set
+    quality = batch.summary
 
     def confidence(sub_rows: list[EvaluableRow]) -> BootstrapResult | None:
         if bootstrap_metric is None or not sub_rows:
@@ -113,12 +150,38 @@ def evaluate_batch(
                 )
             )
 
+    correct_weight = sum(r.weight for r in rows if r.predicted == r.label)
+    total_weight = quality.total_weight_samples
+    excluded_weight = (
+        quality.total_weight_missing
+        + quality.total_weight_conflicting
+        + quality.total_weight_unknown_label
+    )
+    accounting = Accounting(
+        n_samples=quality.n_samples,
+        total_weight=total_weight,
+        evaluable_weight=quality.total_weight_evaluable,
+        correct_weight=correct_weight,
+        excluded_weight=excluded_weight,
+        missing_weight=quality.total_weight_missing,
+        conflicting_weight=quality.total_weight_conflicting,
+        unknown_label_weight=quality.total_weight_unknown_label,
+        accuracy_all_samples=correct_weight / total_weight if total_weight > 0 else 0.0,
+        accuracy_evaluable=overall.metrics.accuracy,
+    )
+
     participating_version = content_version(
         [
             ("sample_set_version", sample_set.version),
             ("prediction_batch_version", batch.version),
-            ("participating_ids", [r.sample_id for r in rows]),
-            ("participating_weights", [r.weight for r in rows]),
+            ("duplicate_policy", "identical-fold-conflicting-excluded-order-independent"),
+            (
+                "participating_rows",
+                [
+                    [r.sample_id, r.label, r.predicted, r.weight]
+                    for r in sorted(rows, key=lambda r: r.sample_id)
+                ],
+            ),
             (
                 "bootstrap",
                 None
@@ -132,7 +195,8 @@ def evaluate_batch(
         prediction_batch_version=batch.version,
         participating_version=participating_version,
         sample_ids=tuple(r.sample_id for r in rows),
-        data_quality=batch.summary,
+        data_quality=quality,
+        accounting=accounting,
         overall=overall,
         groups=tuple(groups),
     )

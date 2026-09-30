@@ -1,7 +1,14 @@
 """预测批次：校验、对齐并保留难例统计。
 
-缺预测、重复预测、未知样本身份、未知预测类别全部单独计数并在报告中保留，
-只有通过全部校验的行进入指标计算。
+重复处理语义与输入顺序无关：
+
+* 同一身份的多条预测内容完全一致时视为一致重复，折叠为一条（多出的行数计入
+  ``n_duplicate_predictions``）；
+* 同一身份的多条预测内容冲突（预测类别不同）时不允许“先到先得”，该身份被
+  明确标记为冲突样本并排除出可计算集合，其权重计入冲突权重，总体对账指标把
+  它当作错误；
+* 缺预测、未知样本身份、未知预测类别同样单独计数、保留身份与权重，只有
+  通过全部校验的行进入指标计算。
 """
 
 from __future__ import annotations
@@ -34,11 +41,17 @@ class AlignmentSummary:
     n_evaluable: int
     n_missing_predictions: int
     n_duplicate_predictions: int
+    n_conflicting_samples: int
     n_unknown_sample_ids: int
     n_unknown_predicted_labels: int
+    total_weight_samples: float
     total_weight_evaluable: float
+    total_weight_missing: float
+    total_weight_conflicting: float
+    total_weight_unknown_label: float
     missing_sample_ids: tuple[str, ...]
     duplicate_sample_ids: tuple[str, ...]
+    conflicting_rows: tuple[tuple[str, tuple[str, ...]], ...]
     unknown_sample_ids: tuple[str, ...]
     unknown_label_rows: tuple[tuple[str, str], ...]
     evaluable_sample_ids: tuple[str, ...]
@@ -50,11 +63,17 @@ class AlignmentSummary:
             "n_evaluable": self.n_evaluable,
             "n_missing_predictions": self.n_missing_predictions,
             "n_duplicate_predictions": self.n_duplicate_predictions,
+            "n_conflicting_samples": self.n_conflicting_samples,
             "n_unknown_sample_ids": self.n_unknown_sample_ids,
             "n_unknown_predicted_labels": self.n_unknown_predicted_labels,
+            "total_weight_samples": self.total_weight_samples,
             "total_weight_evaluable": self.total_weight_evaluable,
+            "total_weight_missing": self.total_weight_missing,
+            "total_weight_conflicting": self.total_weight_conflicting,
+            "total_weight_unknown_label": self.total_weight_unknown_label,
             "missing_sample_ids": list(self.missing_sample_ids),
             "duplicate_sample_ids": list(self.duplicate_sample_ids),
+            "conflicting_rows": [[sid, list(values)] for sid, values in self.conflicting_rows],
             "unknown_sample_ids": list(self.unknown_sample_ids),
             "unknown_label_rows": [list(row) for row in self.unknown_label_rows],
             "evaluable_sample_ids": list(self.evaluable_sample_ids),
@@ -71,33 +90,48 @@ class PredictionBatch:
         self.batch_name = batch_name
         self.sample_set = sample_set
 
-        first_seen: dict[str, Prediction] = {}
-        duplicates: list[str] = []
-        unknown_ids: list[str] = []
-        unknown_label_rows: list[tuple[str, str]] = []
-
+        grouped: dict[str, list[Prediction]] = {}
+        unknown_ids: set[str] = set()
         for pred in predictions:
             if pred.sample_id not in sample_set:
-                unknown_ids.append(pred.sample_id)
+                unknown_ids.add(pred.sample_id)
                 continue
-            if pred.sample_id in first_seen:
-                duplicates.append(pred.sample_id)
-                continue
-            first_seen[pred.sample_id] = pred
-            label = sample_set.get(pred.sample_id).label
-            if pred.predicted is None or pred.predicted not in sample_set.labels:
-                unknown_label_rows.append(
-                    (pred.sample_id, "<missing>" if pred.predicted is None else pred.predicted)
-                )
+            grouped.setdefault(pred.sample_id, []).append(pred)
 
-        missing = [sid for sid in sample_set.ids if sid not in first_seen]
+        missing = sorted(sid for sid in sample_set.ids if sid not in grouped)
         rows: list[EvaluableRow] = []
-        for sid, pred in first_seen.items():
+        duplicates = 0
+        duplicate_ids: set[str] = set()
+        conflicting_rows: list[tuple[str, tuple[str, ...]]] = []
+        unknown_label_rows: list[tuple[str, str]] = []
+        weight_missing = 0.0
+        weight_conflicting = 0.0
+        weight_unknown_label = 0.0
+
+        def label_token(pred: Prediction) -> str:
+            return "<missing>" if pred.predicted is None else pred.predicted
+
+        for sid in sorted(grouped):
             sample = sample_set.get(sid)
-            if pred.predicted is None or pred.predicted not in sample_set.labels:
+            preds = grouped[sid]
+            distinct = sorted({(p.predicted, p.score) for p in preds})
+            if len(preds) > 1:
+                duplicates += len(preds) - 1
+                duplicate_ids.add(sid)
+            if len(distinct) > 1:
+                values = tuple(sorted({label_token(p) for p in preds}))
+                conflicting_rows.append((sid, values))
+                weight_conflicting += sample.weight
                 continue
-            rows.append(EvaluableRow(sid, sample.label, pred.predicted, sample.weight))
-        rows.sort(key=lambda r: r.sample_id)
+            chosen = next(p for p in preds if (p.predicted, p.score) == distinct[0])
+            if chosen.predicted is None or chosen.predicted not in sample_set.labels:
+                unknown_label_rows.append((sid, label_token(chosen)))
+                weight_unknown_label += sample.weight
+                continue
+            rows.append(EvaluableRow(sid, sample.label, chosen.predicted, sample.weight))
+
+        for sid in missing:
+            weight_missing += sample_set.get(sid).weight
 
         self.evaluable_rows: tuple[EvaluableRow, ...] = tuple(rows)
         self.summary = AlignmentSummary(
@@ -105,13 +139,19 @@ class PredictionBatch:
             n_predictions_received=len(predictions),
             n_evaluable=len(rows),
             n_missing_predictions=len(missing),
-            n_duplicate_predictions=len(duplicates),
+            n_duplicate_predictions=duplicates,
+            n_conflicting_samples=len(conflicting_rows),
             n_unknown_sample_ids=len(unknown_ids),
             n_unknown_predicted_labels=len(unknown_label_rows),
+            total_weight_samples=sum(s.weight for s in sample_set.samples),
             total_weight_evaluable=sum(r.weight for r in rows),
-            missing_sample_ids=tuple(sorted(missing)),
-            duplicate_sample_ids=tuple(sorted(set(duplicates))),
-            unknown_sample_ids=tuple(unknown_ids),
+            total_weight_missing=weight_missing,
+            total_weight_conflicting=weight_conflicting,
+            total_weight_unknown_label=weight_unknown_label,
+            missing_sample_ids=tuple(missing),
+            duplicate_sample_ids=tuple(sorted(duplicate_ids)),
+            conflicting_rows=tuple(conflicting_rows),
+            unknown_sample_ids=tuple(sorted(unknown_ids)),
             unknown_label_rows=tuple(unknown_label_rows),
             evaluable_sample_ids=tuple(r.sample_id for r in rows),
         )
@@ -123,8 +163,15 @@ class PredictionBatch:
                     "predictions",
                     [
                         [p.sample_id, p.predicted, p.score]
-                        for p in sorted(predictions, key=lambda p: (p.sample_id, p.predicted or ""))
+                        for p in sorted(
+                            predictions,
+                            key=lambda p: (p.sample_id, p.predicted or "", p.score if p.score is not None else ""),
+                        )
                     ],
+                ),
+                (
+                    "duplicate_policy",
+                    "identical-fold-conflicting-excluded-order-independent",
                 ),
             ]
         )
