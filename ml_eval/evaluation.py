@@ -85,12 +85,13 @@ def evaluate_batch(
             n_replicates=n_replicates,
             seed=seed,
             confidence_level=confidence_level,
+            labels=sample_set.labels,
         )
 
     overall = GroupReport(
         group=None,
         n_samples=len(rows),
-        metrics=multiclass_metrics(rows),
+        metrics=multiclass_metrics(rows, sample_set.labels),
         confidence=confidence(list(rows)),
     )
 
@@ -108,7 +109,7 @@ def evaluate_batch(
                 GroupReport(
                     group=name,
                     n_samples=len(sub_rows),
-                    metrics=multiclass_metrics(sub_rows),
+                    metrics=multiclass_metrics(sub_rows, sample_set.labels),
                     confidence=confidence(sub_rows),
                 )
             )
@@ -117,8 +118,13 @@ def evaluate_batch(
         [
             ("sample_set_version", sample_set.version),
             ("prediction_batch_version", batch.version),
-            ("participating_ids", [r.sample_id for r in rows]),
-            ("participating_weights", [r.weight for r in rows]),
+            (
+                "participating_rows",
+                [
+                    (r.sample_id, r.weight, r.predicted)
+                    for r in sorted(rows, key=lambda r: r.sample_id)
+                ],
+            ),
             (
                 "bootstrap",
                 None

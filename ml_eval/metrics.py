@@ -72,25 +72,33 @@ def confusion_counts(
 ) -> dict[str, dict[str, float]]:
     rows = list(rows)
     if labels is None:
-        labels = tuple(sorted({r.label for r in rows} | {r.predicted for r in rows}))
+        labels = tuple(sorted({r.label for r in rows}))
     matrix = {true: {pred: 0.0 for pred in labels} for true in labels}
     for row in rows:
-        matrix[row.label][row.predicted] += row.weight
+        if row.predicted in labels:
+            matrix[row.label][row.predicted] += row.weight
     return matrix
 
 
-def multiclass_metrics(rows: Iterable) -> MetricSet:
+def multiclass_metrics(
+    rows: Iterable,
+    labels: Sequence[str] | None = None,
+) -> MetricSet:
     rows = list(rows)
-    labels = tuple(sorted({r.label for r in rows} | {r.predicted for r in rows}))
-    matrix = confusion_counts(rows, labels)
+    metric_labels = (
+        tuple(labels)
+        if labels is not None
+        else tuple(sorted({r.label for r in rows}))
+    )
+    matrix = confusion_counts(rows, metric_labels)
     total = sum(r.weight for r in rows)
-    correct = sum(matrix[l][l] for l in labels)
+    correct = sum(matrix[l][l] for l in metric_labels)
 
     per_class: dict[str, ClassMetrics] = {}
-    for label in labels:
+    for label in metric_labels:
         tp = matrix[label][label]
-        support = sum(matrix[label][p] for p in labels)
-        predicted_support = sum(matrix[t][label] for t in labels)
+        support = sum(r.weight for r in rows if r.label == label)
+        predicted_support = sum(matrix[t][label] for t in metric_labels)
         fp = predicted_support - tp
         fn = support - tp
         precision = tp / predicted_support if predicted_support > 0 else None
@@ -124,7 +132,7 @@ def multiclass_metrics(rows: Iterable) -> MetricSet:
         ) / total
 
     return MetricSet(
-        labels=labels,
+        labels=metric_labels,
         per_class=per_class,
         accuracy=correct / total if total > 0 else 0.0,
         total_weight=total,

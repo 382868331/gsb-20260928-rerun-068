@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Sequence
 
 import numpy as np
 
@@ -58,8 +59,9 @@ def bootstrap_ci(
     n_replicates: int = 1000,
     seed: int = 20260929,
     confidence_level: float = 0.95,
+    labels: Sequence[str] | None = None,
 ) -> BootstrapResult:
-    rows = list(rows)
+    rows = sorted(rows, key=lambda r: r.sample_id)
     if not rows:
         raise ValueError("没有可重采样的行")
     if n_replicates <= 0:
@@ -67,14 +69,19 @@ def bootstrap_ci(
     if not 0.0 < confidence_level < 1.0:
         raise ValueError("confidence_level 必须在 (0, 1) 内")
 
-    point = metric_value(multiclass_metrics(rows), metric)
+    metric_labels = (
+        tuple(labels)
+        if labels is not None
+        else tuple(sorted({r.label for r in rows}))
+    )
+    point = metric_value(multiclass_metrics(rows, metric_labels), metric)
     rng = np.random.default_rng(seed)
     n = len(rows)
     values = np.empty(n_replicates, dtype=float)
     for i in range(n_replicates):
         idx = rng.integers(0, n, size=n)
         replicate = [rows[j] for j in idx]
-        values[i] = metric_value(multiclass_metrics(replicate), metric)
+        values[i] = metric_value(multiclass_metrics(replicate, metric_labels), metric)
 
     alpha = (1.0 - confidence_level) / 2.0
     lower = float(np.quantile(values, alpha))
@@ -88,7 +95,11 @@ def bootstrap_ci(
                     n_replicates,
                     seed,
                     confidence_level,
-                    [r.sample_id for r in rows],
+                    metric_labels,
+                    [
+                        [r.sample_id, r.weight, r.predicted]
+                        for r in rows
+                    ],
                 ],
             )
         ]
