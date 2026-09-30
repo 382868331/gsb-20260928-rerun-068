@@ -22,6 +22,21 @@
   `prediction_batch_version`、`participating_version` 三个版本号，并给出
   `accounting` 全样本对账：缺预测/冲突/未知类别的权重分母与全样本准确率
   （异常样本按错误计），避免剔除异常后总体指标虚高。
+- `ml_eval/comparison.py`：多模型并排比较。每个模型先独立走同一套
+  `evaluate_batch` 口径，比较层只汇总不重算：`coverage`（可评估权重 /
+  全样本权重）把覆盖率不一致摆到明面，可评估口径（诊断视角）与全样本口径
+  并列展示；分组比较表取各模型分组的并集，某模型没有可评估行的组也显式
+  出现（指标为 null，权重去向在该模型的组级 `accounting` 中列明）。
+  参与比较的批次必须对齐同一样本集版本。
+
+## 两种准确率口径
+
+- `accuracy_evaluable`：仅在可评估样本上计算的诊断视角；
+- `accuracy_all_samples`：全样本口径，缺预测/冲突/未知类别一律按错误计。
+
+总体与每个分组都带 `accounting`，列出 total/evaluable/correct/excluded 及
+missing/conflicting/unknown_label 的权重去向，分组账目加总等于总体账目；
+没有任何可评估行的分组仍然呈现（`metrics` 与置信区间为 null）。
 
 ## 本地使用
 
@@ -34,6 +49,13 @@ python -m ml_eval \
   --group region \
   --bootstrap-metric accuracy --replicates 1000 --seed 20260929 \
   -o report.json
+
+# 多模型比较（覆盖率不一致时并排核对）
+python -m ml_eval \
+  --samples examples/samples.csv \
+  --model model_a=examples/predictions.csv \
+  --model model_b=other_predictions.csv \
+  --group region -o comparison.json
 ```
 
 ## 可手算核对（examples）

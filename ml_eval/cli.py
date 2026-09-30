@@ -7,6 +7,7 @@ import json
 import sys
 
 from .evaluation import evaluate_batch
+from .comparison import compare_batches
 from .io import load_predictions, load_samples
 from .predictions import PredictionBatch
 
@@ -14,7 +15,14 @@ from .predictions import PredictionBatch
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ml-eval", description="分类预测分组评估")
     parser.add_argument("--samples", required=True, help="样本集 CSV/JSON")
-    parser.add_argument("--predictions", required=True, help="预测批次 CSV/JSON")
+    parser.add_argument("--predictions", help="单个预测批次 CSV/JSON")
+    parser.add_argument(
+        "--model",
+        action="append",
+        default=[],
+        metavar="NAME=PATH",
+        help="参与比较的模型预测批次，可重复；与 --predictions 互斥",
+    )
     parser.add_argument("--batch-name", default="local-batch")
     parser.add_argument("--group", help="分组属性名（对应 g_<名字> 列或 groups 键）")
     parser.add_argument(
@@ -31,21 +39,46 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.predictions and args.model:
+        raise SystemExit("--predictions 与 --model 互斥，请只选一种模式")
+    if not args.predictions and not args.model:
+        raise SystemExit("必须提供 --predictions 或至少一个 --model NAME=PATH")
     sample_set = load_samples(args.samples)
-    predictions = load_predictions(args.predictions)
-    batch = PredictionBatch(
-        predictions=predictions,
-        sample_set=sample_set,
-        batch_name=args.batch_name,
-    )
-    report = evaluate_batch(
-        batch,
-        group_attr=args.group,
-        bootstrap_metric=args.bootstrap_metric,
-        n_replicates=args.replicates,
-        seed=args.seed,
-        confidence_level=args.confidence,
-    )
+    if args.model:
+        batches = []
+        for spec in args.model:
+            if "=" not in spec:
+                raise SystemExit(f"--model 需要 NAME=PATH 形式: {spec}")
+            name, path = spec.split("=", 1)
+            batches.append(
+                PredictionBatch(
+                    predictions=load_predictions(path),
+                    sample_set=sample_set,
+                    batch_name=name,
+                )
+            )
+        report = compare_batches(
+            batches,
+            group_attr=args.group,
+            bootstrap_metric=args.bootstrap_metric,
+            n_replicates=args.replicates,
+            seed=args.seed,
+            confidence_level=args.confidence,
+        )
+    else:
+        batch = PredictionBatch(
+            predictions=load_predictions(args.predictions),
+            sample_set=sample_set,
+            batch_name=args.batch_name,
+        )
+        report = evaluate_batch(
+            batch,
+            group_attr=args.group,
+            bootstrap_metric=args.bootstrap_metric,
+            n_replicates=args.replicates,
+            seed=args.seed,
+            confidence_level=args.confidence,
+        )
     text = json.dumps(report.to_dict(), ensure_ascii=False, indent=2, sort_keys=True)
     if args.output:
         with open(args.output, "w", encoding="utf-8") as fh:

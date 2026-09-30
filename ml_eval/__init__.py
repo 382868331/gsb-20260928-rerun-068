@@ -9,6 +9,7 @@ from .predictions import Prediction, PredictionBatch, AlignmentSummary, Evaluabl
 from .metrics import binary_metrics, multiclass_metrics, confusion_counts
 from .resample import bootstrap_ci
 from .evaluation import Accounting, GroupReport, evaluate_batch
+from .comparison import ComparisonReport, ModelEntry, compare_batches
 
 __all__ = [
     "Sample",
@@ -23,6 +24,9 @@ __all__ = [
     "GroupReport",
     "Accounting",
     "evaluate_batch",
+    "ComparisonReport",
+    "ModelEntry",
+    "compare_batches",
 ]
 
 __version__ = "0.1.0"

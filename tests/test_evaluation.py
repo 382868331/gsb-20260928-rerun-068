@@ -8,6 +8,7 @@ from ml_eval import (
     SampleSet,
     Prediction,
     bootstrap_ci,
+    compare_batches,
     evaluate_batch,
 )
 
@@ -222,3 +223,135 @@ def test_no_evaluable_rows_still_reports_quality():
     assert report.overall.n_samples == 0
     assert report.data_quality.n_unknown_predicted_labels == 1
     assert report.overall.metrics.accuracy == 0.0
+
+
+def make_samples_with_empty_group():
+    return SampleSet(
+        [
+            Sample("s1", "A", 1.0, {"region": "x"}),
+            Sample("s2", "B", 2.0, {"region": "x"}),
+            Sample("s3", "A", 1.0, {"region": "z"}),  # 整组缺预测
+            Sample("s4", "B", 4.0, {"region": "z"}),  # 整组缺预测
+        ]
+    )
+
+
+def test_group_without_evaluable_rows_is_still_listed():
+    samples = make_samples_with_empty_group()
+    preds = [Prediction("s1", "A"), Prediction("s2", "A")]
+    report = evaluate_batch(PredictionBatch(preds, samples), "region")
+    groups = {g.group: g for g in report.groups}
+    assert set(groups) == {"x", "z"}
+    empty = groups["z"]
+    assert empty.n_samples == 0
+    assert empty.metrics is None
+    assert empty.confidence is None
+    acc = empty.accounting
+    assert acc.n_samples == 2
+    assert acc.total_weight == pytest.approx(5.0)
+    assert acc.missing_weight == pytest.approx(5.0)
+    assert acc.excluded_weight == pytest.approx(5.0)
+    assert acc.evaluable_weight == 0.0
+    assert acc.accuracy_all_samples == 0.0
+    assert acc.accuracy_evaluable is None
+
+
+def test_group_accounting_reconciles_with_overall():
+    # 重复 + 冲突 + 未知类别 + 缺预测同时出现：分组账目加总必须等于总体账目
+    samples = SampleSet(
+        [
+            Sample("s1", "A", 1.0, {"region": "x"}),
+            Sample("s2", "A", 2.0, {"region": "x"}),
+            Sample("s3", "B", 3.0, {"region": "y"}),  # 冲突
+            Sample("s4", "B", 4.0, {"region": "y"}),  # 未知类别
+            Sample("s5", "A", 5.0, {"region": "y"}),  # 缺预测
+        ]
+    )
+    preds = [
+        Prediction("s1", "A"),
+        Prediction("s1", "A"),  # 一致重复
+        Prediction("s2", "B"),
+        Prediction("s3", "A"),
+        Prediction("s3", "B"),  # 冲突
+        Prediction("s4", "Z"),  # 未知类别
+    ]
+    report = evaluate_batch(PredictionBatch(preds, samples), "region")
+    overall = report.accounting
+    assert overall.missing_weight == pytest.approx(5.0)
+    assert overall.conflicting_weight == pytest.approx(3.0)
+    assert overall.unknown_label_weight == pytest.approx(4.0)
+    assert overall.evaluable_weight == pytest.approx(3.0)
+    assert overall.correct_weight == pytest.approx(1.0)
+    assert overall.accuracy_all_samples == pytest.approx(1.0 / 15.0)
+    for field in (
+        "n_samples",
+        "total_weight",
+        "evaluable_weight",
+        "correct_weight",
+        "excluded_weight",
+        "missing_weight",
+        "conflicting_weight",
+        "unknown_label_weight",
+    ):
+        assert sum(getattr(g.accounting, field) for g in report.groups) == pytest.approx(
+            getattr(overall, field)
+        )
+    # 区间说明与计数同源：重采样参与行就是可评估集合
+    report_ci = evaluate_batch(
+        PredictionBatch(preds, samples), "region", "accuracy", n_replicates=50, seed=3
+    )
+    assert report_ci.overall.confidence.point == pytest.approx(
+        report_ci.accounting.accuracy_evaluable
+    )
+    y = {g.group: g for g in report_ci.groups}["y"]
+    assert y.confidence is None  # y 组无可评估行，不产生区间
+
+
+def test_compare_models_with_different_coverage():
+    samples = make_samples_with_empty_group()
+    full = PredictionBatch(
+        [
+            Prediction("s1", "A"),
+            Prediction("s2", "B"),
+            Prediction("s3", "A"),
+            Prediction("s4", "A"),
+        ],
+        samples,
+        "full",
+    )
+    partial = PredictionBatch(
+        [Prediction("s1", "A"), Prediction("s2", "A")],
+        samples,
+        "partial",
+    )
+    report = compare_batches([full, partial], group_attr="region")
+    models = {m.batch_name: m for m in report.models}
+    assert models["full"].coverage == pytest.approx(1.0)
+    assert models["partial"].coverage == pytest.approx(3.0 / 8.0)
+    # 诊断视角（可评估口径）partial 更高，但全样本口径它更低，两者并列展示
+    assert models["partial"].report.accounting.accuracy_evaluable == pytest.approx(1.0 / 3.0)
+    assert models["full"].report.accounting.accuracy_evaluable == pytest.approx(0.5)
+    assert models["partial"].report.accounting.accuracy_all_samples == pytest.approx(1.0 / 8.0)
+    assert models["full"].report.accounting.accuracy_all_samples == pytest.approx(0.5)
+    # 缺失分组在比较表中同样呈现
+    rows = {row.group: row for row in report.groups}
+    assert set(rows) == {"x", "z"}
+    z = rows["z"]
+    assert z.n_samples == 2
+    assert z.total_weight == pytest.approx(5.0)
+    assert z.per_model["full"]["n_evaluable"] == 2
+    assert z.per_model["partial"]["n_evaluable"] == 0
+    assert z.per_model["partial"]["accuracy_evaluable"] is None
+    assert z.per_model["partial"]["accuracy_all_samples"] == 0.0
+    assert z.per_model["partial"]["excluded_weight"] == pytest.approx(5.0)
+
+
+def test_compare_requires_same_sample_set():
+    samples_a = SampleSet([Sample("s1", "A")])
+    samples_b = SampleSet([Sample("s1", "A", 2.0)])
+    b1 = PredictionBatch([Prediction("s1", "A")], samples_a, "m1")
+    b2 = PredictionBatch([Prediction("s1", "A")], samples_b, "m2")
+    with pytest.raises(ValueError, match="同一样本集"):
+        compare_batches([b1, b2])
+    with pytest.raises(ValueError, match="唯一"):
+        compare_batches([b1, b1])

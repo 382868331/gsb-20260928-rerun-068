@@ -20,15 +20,18 @@ from .versioning import content_version
 class GroupReport:
     group: str | None
     n_samples: int
-    metrics: MetricSet
+    metrics: MetricSet | None
     confidence: BootstrapResult | None = None
+    accounting: "Accounting | None" = None
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
             "group": self.group,
             "n_samples": self.n_samples,
-            "metrics": self.metrics.to_dict(),
+            "metrics": None if self.metrics is None else self.metrics.to_dict(),
         }
+        if self.accounting is not None:
+            out["accounting"] = self.accounting.to_dict()
         if self.confidence is not None:
             out["confidence"] = {
                 "metric": self.confidence.metric,
@@ -60,7 +63,7 @@ class Accounting:
     conflicting_weight: float
     unknown_label_weight: float
     accuracy_all_samples: float
-    accuracy_evaluable: float
+    accuracy_evaluable: float | None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -101,6 +104,35 @@ class EvaluationReport:
         }
 
 
+def _group_value(sample, group_attr: str) -> str:
+    value = sample.groups.get(group_attr)
+    return "__unassigned__" if value is None else str(value)
+
+
+def _accounting_for(
+    n_samples: int,
+    total_weight: float,
+    evaluable_weight: float,
+    correct_weight: float,
+    missing_weight: float,
+    conflicting_weight: float,
+    unknown_label_weight: float,
+    evaluable_accuracy: float | None,
+) -> Accounting:
+    return Accounting(
+        n_samples=n_samples,
+        total_weight=total_weight,
+        evaluable_weight=evaluable_weight,
+        correct_weight=correct_weight,
+        excluded_weight=missing_weight + conflicting_weight + unknown_label_weight,
+        missing_weight=missing_weight,
+        conflicting_weight=conflicting_weight,
+        unknown_label_weight=unknown_label_weight,
+        accuracy_all_samples=correct_weight / total_weight if total_weight > 0 else 0.0,
+        accuracy_evaluable=evaluable_accuracy,
+    )
+
+
 def evaluate_batch(
     batch: PredictionBatch,
     group_attr: str | None = None,
@@ -135,39 +167,72 @@ def evaluate_batch(
     if group_attr is not None:
         buckets: dict[str, list[EvaluableRow]] = {}
         for row in rows:
-            value = sample_set.get(row.sample_id).groups.get(group_attr)
-            if value is None:
-                value = "__unassigned__"
-            buckets.setdefault(str(value), []).append(row)
-        for name in sorted(buckets):
-            sub_rows = buckets[name]
+            buckets.setdefault(
+                _group_value(sample_set.get(row.sample_id), group_attr), []
+            ).append(row)
+        # 分组宇宙来自样本集本身：没有任何可评估行的组也要呈现，
+        # 其权重去向（缺预测/冲突/未知类别）在组级对账中列明。
+        conflicting_ids = {sid for sid, _ in quality.conflicting_rows}
+        unknown_label_ids = {sid for sid, _ in quality.unknown_label_rows}
+        missing_ids = set(quality.missing_sample_ids)
+        group_values = sorted(
+            {_group_value(sample, group_attr) for sample in sample_set.samples}
+        )
+        for name in group_values:
+            sub_rows = buckets.get(name, [])
+            g_samples = [
+                sample
+                for sample in sample_set.samples
+                if _group_value(sample, group_attr) == name
+            ]
+            g_total = sum(sample.weight for sample in g_samples)
+            g_missing = sum(
+                sample.weight for sample in g_samples if sample.sample_id in missing_ids
+            )
+            g_conflicting = sum(
+                sample.weight
+                for sample in g_samples
+                if sample.sample_id in conflicting_ids
+            )
+            g_unknown_label = sum(
+                sample.weight
+                for sample in g_samples
+                if sample.sample_id in unknown_label_ids
+            )
+            g_evaluable = sum(r.weight for r in sub_rows)
+            g_correct = sum(r.weight for r in sub_rows if r.predicted == r.label)
+            g_metrics = multiclass_metrics(sub_rows) if sub_rows else None
+            g_accounting = _accounting_for(
+                n_samples=len(g_samples),
+                total_weight=g_total,
+                evaluable_weight=g_evaluable,
+                correct_weight=g_correct,
+                missing_weight=g_missing,
+                conflicting_weight=g_conflicting,
+                unknown_label_weight=g_unknown_label,
+                evaluable_accuracy=None if g_metrics is None else g_metrics.accuracy,
+            )
             groups.append(
                 GroupReport(
                     group=name,
                     n_samples=len(sub_rows),
-                    metrics=multiclass_metrics(sub_rows),
+                    metrics=g_metrics,
                     confidence=confidence(sub_rows),
+                    accounting=g_accounting,
                 )
             )
 
     correct_weight = sum(r.weight for r in rows if r.predicted == r.label)
     total_weight = quality.total_weight_samples
-    excluded_weight = (
-        quality.total_weight_missing
-        + quality.total_weight_conflicting
-        + quality.total_weight_unknown_label
-    )
-    accounting = Accounting(
+    accounting = _accounting_for(
         n_samples=quality.n_samples,
         total_weight=total_weight,
         evaluable_weight=quality.total_weight_evaluable,
         correct_weight=correct_weight,
-        excluded_weight=excluded_weight,
         missing_weight=quality.total_weight_missing,
         conflicting_weight=quality.total_weight_conflicting,
         unknown_label_weight=quality.total_weight_unknown_label,
-        accuracy_all_samples=correct_weight / total_weight if total_weight > 0 else 0.0,
-        accuracy_evaluable=overall.metrics.accuracy,
+        evaluable_accuracy=overall.metrics.accuracy,
     )
 
     participating_version = content_version(
