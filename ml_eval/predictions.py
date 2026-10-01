@@ -35,6 +35,24 @@ class EvaluableRow:
 
 
 @dataclass(frozen=True)
+class ScoredRow:
+    """全样本口径下每个样本的计分行：每个样本恰好出现一次。
+
+    ``status`` 取值：``evaluable``（合法预测）、``missing``（缺预测）、
+    ``conflicting``（冲突预测）、``unknown_label``（未知预测类别）。
+    只有 ``evaluable`` 行可能 ``correct=True``；其余状态在全样本口径中
+    一律按错误计，保证总体/分组/重采样使用同一个参与范围。
+    """
+
+    sample_id: str
+    label: str
+    predicted: str | None
+    weight: float
+    correct: bool
+    status: str
+
+
+@dataclass(frozen=True)
 class AlignmentSummary:
     n_samples: int
     n_predictions_received: int
@@ -100,6 +118,7 @@ class PredictionBatch:
 
         missing = sorted(sid for sid in sample_set.ids if sid not in grouped)
         rows: list[EvaluableRow] = []
+        scored: dict[str, ScoredRow] = {}
         duplicates = 0
         duplicate_ids: set[str] = set()
         conflicting_rows: list[tuple[str, tuple[str, ...]]] = []
@@ -122,18 +141,34 @@ class PredictionBatch:
                 values = tuple(sorted({label_token(p) for p in preds}))
                 conflicting_rows.append((sid, values))
                 weight_conflicting += sample.weight
+                scored[sid] = ScoredRow(
+                    sid, sample.label, None, sample.weight, False, "conflicting"
+                )
                 continue
             chosen = next(p for p in preds if (p.predicted, p.score) == distinct[0])
             if chosen.predicted is None or chosen.predicted not in sample_set.labels:
                 unknown_label_rows.append((sid, label_token(chosen)))
                 weight_unknown_label += sample.weight
+                scored[sid] = ScoredRow(
+                    sid, sample.label, chosen.predicted, sample.weight,
+                    False, "unknown_label",
+                )
                 continue
             rows.append(EvaluableRow(sid, sample.label, chosen.predicted, sample.weight))
+            scored[sid] = ScoredRow(
+                sid, sample.label, chosen.predicted, sample.weight,
+                chosen.predicted == sample.label, "evaluable",
+            )
 
         for sid in missing:
-            weight_missing += sample_set.get(sid).weight
+            sample = sample_set.get(sid)
+            weight_missing += sample.weight
+            scored[sid] = ScoredRow(sid, sample.label, None, sample.weight, False, "missing")
 
         self.evaluable_rows: tuple[EvaluableRow, ...] = tuple(rows)
+        self.scored_rows: tuple[ScoredRow, ...] = tuple(
+            scored[sid] for sid in sample_set.ids
+        )
         self.summary = AlignmentSummary(
             n_samples=len(sample_set),
             n_predictions_received=len(predictions),

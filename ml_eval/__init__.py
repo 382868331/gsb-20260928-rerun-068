@@ -7,22 +7,28 @@
 from .samples import Sample, SampleSet
 from .predictions import Prediction, PredictionBatch, AlignmentSummary, EvaluableRow
 from .metrics import binary_metrics, multiclass_metrics, confusion_counts
-from .resample import bootstrap_ci
-from .evaluation import Accounting, GroupReport, evaluate_batch
+from .resample import bootstrap_ci, bootstrap_scored_accuracy
+from .evaluation import Accounting, ScopeReport, evaluate_batch
+from .compare import ComparisonReport, compare_reports
+from .predictions import ScoredRow
 
 __all__ = [
     "Sample",
     "SampleSet",
     "PredictionBatch",
     "AlignmentSummary",
-    "EvaluableRows",
+    "EvaluableRow",
+    "ScoredRow",
     "binary_metrics",
     "multiclass_metrics",
     "confusion_counts",
     "bootstrap_ci",
-    "GroupReport",
+    "bootstrap_scored_accuracy",
+    "ScopeReport",
     "Accounting",
     "evaluate_batch",
+    "ComparisonReport",
+    "compare_reports",
 ]
 
 __version__ = "0.1.0"

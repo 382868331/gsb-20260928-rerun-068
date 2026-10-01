@@ -12,20 +12,36 @@ from dataclasses import dataclass
 import numpy as np
 
 from .metrics import MetricSet, multiclass_metrics
-from .predictions import EvaluableRow
+from .predictions import EvaluableRow, ScoredRow
 from .versioning import content_version
 
 
 @dataclass(frozen=True)
 class BootstrapResult:
     metric: str
+    scope: str
     point: float
     lower: float
     upper: float
     n_replicates: int
+    n_rows: int
     seed: int
     confidence_level: float
     replicate_version: str
+
+    def to_dict(self) -> dict:
+        return {
+            "metric": self.metric,
+            "scope": self.scope,
+            "point": self.point,
+            "lower": self.lower,
+            "upper": self.upper,
+            "n_replicates": self.n_replicates,
+            "n_rows": self.n_rows,
+            "seed": self.seed,
+            "confidence_level": self.confidence_level,
+            "replicate_version": self.replicate_version,
+        }
 
 
 _METRIC_GETTERS = {
@@ -59,6 +75,7 @@ def bootstrap_ci(
     seed: int = 20260929,
     confidence_level: float = 0.95,
 ) -> BootstrapResult:
+    """可评估行上的诊断区间（scope=evaluable_only，与全样本口径分开命名）。"""
     rows = list(rows)
     if not rows:
         raise ValueError("没有可重采样的行")
@@ -87,6 +104,7 @@ def bootstrap_ci(
             (
                 "bootstrap",
                 [
+                    "evaluable_only",
                     metric,
                     n_replicates,
                     seed,
@@ -101,10 +119,82 @@ def bootstrap_ci(
     )
     return BootstrapResult(
         metric=metric,
+        scope="evaluable_only",
         point=point,
         lower=lower,
         upper=upper,
         n_replicates=n_replicates,
+        n_rows=n,
+        seed=seed,
+        confidence_level=confidence_level,
+        replicate_version=replicate_version,
+    )
+
+
+def bootstrap_scored_accuracy(
+    rows: tuple[ScoredRow, ...] | list[ScoredRow],
+    n_replicates: int = 1000,
+    seed: int = 20260929,
+    confidence_level: float = 0.95,
+) -> BootstrapResult:
+    """全样本口径（scope=all_samples）的加权准确率区间。
+
+    参与行是样本集中的每一个样本（缺预测/冲突/未知类别按错误计），
+    与总体、分组指标使用同一个参与范围；区间说明里的 ``n_rows``、
+    ``scope`` 与对账计数可以直接互相核对。
+    """
+    rows = list(rows)
+    if not rows:
+        raise ValueError("没有可重采样的行")
+    if n_replicates <= 0:
+        raise ValueError("n_replicates 必须为正整数")
+    if not 0.0 < confidence_level < 1.0:
+        raise ValueError("confidence_level 必须在 (0, 1) 内")
+
+    def scored_accuracy(sample: list[ScoredRow]) -> float:
+        total = sum(r.weight for r in sample)
+        if total <= 0:
+            return 0.0
+        return sum(r.weight for r in sample if r.correct) / total
+
+    point = scored_accuracy(rows)
+    rng = np.random.default_rng(seed)
+    n = len(rows)
+    values = np.empty(n_replicates, dtype=float)
+    for i in range(n_replicates):
+        idx = rng.integers(0, n, size=n)
+        values[i] = scored_accuracy([rows[j] for j in idx])
+
+    alpha = (1.0 - confidence_level) / 2.0
+    lower = float(np.quantile(values, alpha))
+    upper = float(np.quantile(values, 1.0 - alpha))
+    rows_sorted = sorted(rows, key=lambda r: r.sample_id)
+    replicate_version = content_version(
+        [
+            (
+                "bootstrap",
+                [
+                    "all_samples",
+                    "accuracy",
+                    n_replicates,
+                    seed,
+                    confidence_level,
+                    [
+                        [r.sample_id, r.label, r.predicted, r.weight, r.correct, r.status]
+                        for r in rows_sorted
+                    ],
+                ],
+            )
+        ]
+    )
+    return BootstrapResult(
+        metric="accuracy",
+        scope="all_samples",
+        point=point,
+        lower=lower,
+        upper=upper,
+        n_replicates=n_replicates,
+        n_rows=n,
         seed=seed,
         confidence_level=confidence_level,
         replicate_version=replicate_version,
