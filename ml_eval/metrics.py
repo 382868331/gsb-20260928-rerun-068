@@ -42,6 +42,9 @@ class MetricSet:
     per_class: dict[str, ClassMetrics]
     accuracy: float
     total_weight: float
+    abstain_label: str | None
+    correct_weight: float
+    abstain_weight: float
     macro_precision: float
     macro_recall: float
     macro_f1: float
@@ -55,6 +58,12 @@ class MetricSet:
             "labels": list(self.labels),
             "accuracy": self.accuracy,
             "total_weight": self.total_weight,
+            "abstain_label": self.abstain_label,
+            "correct_weight": self.correct_weight,
+            "abstain_weight": self.abstain_weight,
+            "abstain_rate": (
+                self.abstain_weight / self.total_weight if self.total_weight > 0 else 0.0
+            ),
             "macro_precision": self.macro_precision,
             "macro_recall": self.macro_recall,
             "macro_f1": self.macro_f1,
@@ -69,22 +78,46 @@ class MetricSet:
 def confusion_counts(
     rows: Iterable,
     labels: Sequence[str] | None = None,
+    abstain_label: str | None = None,
 ) -> dict[str, dict[str, float]]:
     rows = list(rows)
     if labels is None:
         labels = tuple(sorted({r.label for r in rows} | {r.predicted for r in rows}))
-    matrix = {true: {pred: 0.0 for pred in labels} for true in labels}
+    pred_labels = list(labels)
+    if abstain_label is not None and abstain_label not in pred_labels:
+        pred_labels = pred_labels + [abstain_label]
+    matrix = {true: {pred: 0.0 for pred in pred_labels} for true in labels}
     for row in rows:
         matrix[row.label][row.predicted] += row.weight
     return matrix
 
 
-def multiclass_metrics(rows: Iterable) -> MetricSet:
+def multiclass_metrics(
+    rows: Iterable,
+    labels: Sequence[str] | None = None,
+    abstain_label: str | None = None,
+) -> MetricSet:
+    """加权多类指标。
+
+    ``labels`` 显式给定真值标签宇宙，避免某个类别在参与范围内没有预测时
+    被静默丢掉；``abstain_label`` 给出主动拒答（含缺预测/冲突/未知类别按
+    拒答处理）的伪类别列：它不作为一个真实类别参与 P/R/F1，但对应样本
+    留在分母里并按错误（FN）计。
+    """
     rows = list(rows)
-    labels = tuple(sorted({r.label for r in rows} | {r.predicted for r in rows}))
-    matrix = confusion_counts(rows, labels)
+    if labels is None:
+        labels = tuple(
+            sorted({r.label for r in rows} | {r.predicted for r in rows})
+        )
+    labels = tuple(labels)
+    if abstain_label is not None and abstain_label in labels:
+        raise ValueError(f"拒答伪类别 {abstain_label} 不能与真实类别重名")
+    matrix = confusion_counts(rows, labels, abstain_label)
     total = sum(r.weight for r in rows)
     correct = sum(matrix[l][l] for l in labels)
+    abstain_weight = (
+        sum(matrix[t][abstain_label] for t in labels) if abstain_label else 0.0
+    )
 
     per_class: dict[str, ClassMetrics] = {}
     for label in labels:
@@ -128,6 +161,9 @@ def multiclass_metrics(rows: Iterable) -> MetricSet:
         per_class=per_class,
         accuracy=correct / total if total > 0 else 0.0,
         total_weight=total,
+        abstain_label=abstain_label,
+        correct_weight=correct,
+        abstain_weight=abstain_weight,
         macro_precision=macro("precision"),
         macro_recall=macro("recall"),
         macro_f1=macro("f1"),

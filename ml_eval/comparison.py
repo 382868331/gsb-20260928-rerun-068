@@ -13,6 +13,7 @@ from typing import Any
 
 from .evaluation import EvaluationReport, evaluate_batch
 from .predictions import PredictionBatch
+from .scope import SCOPE_ALL, validate_scope
 from .versioning import content_version
 
 
@@ -21,6 +22,8 @@ class ModelEntry:
     batch_name: str
     prediction_batch_version: str
     participating_version: str
+    scope: str
+    default_score: dict[str, Any]
     coverage: float
     report: EvaluationReport
 
@@ -29,6 +32,8 @@ class ModelEntry:
             "batch_name": self.batch_name,
             "prediction_batch_version": self.prediction_batch_version,
             "participating_version": self.participating_version,
+            "scope": self.scope,
+            "default_score": self.default_score,
             "coverage": self.coverage,
             "accounting": self.report.accounting.to_dict(),
             "overall": self.report.overall.to_dict(),
@@ -77,7 +82,9 @@ def compare_batches(
     n_replicates: int = 1000,
     seed: int = 20260929,
     confidence_level: float = 0.95,
+    scope: str = SCOPE_ALL,
 ) -> ComparisonReport:
+    validate_scope(scope)
     batches = list(batches)
     if not batches:
         raise ValueError("比较至少需要一个预测批次")
@@ -99,6 +106,7 @@ def compare_batches(
             n_replicates=n_replicates,
             seed=seed,
             confidence_level=confidence_level,
+            scope=scope,
         )
         reports[batch.batch_name] = report
         accounting = report.accounting
@@ -112,6 +120,8 @@ def compare_batches(
                 batch_name=batch.batch_name,
                 prediction_batch_version=report.prediction_batch_version,
                 participating_version=report.participating_version,
+                scope=scope,
+                default_score=report.default_score.to_dict(),
                 coverage=coverage,
                 report=report,
             )
@@ -132,8 +142,9 @@ def compare_batches(
                     None,
                 )
                 if group_report is None or group_report.accounting is None:
-                    per_model[model.batch_name] = {
-                        "n_evaluable": 0,
+                per_model[model.batch_name] = {
+                    "default_accuracy": None,
+                    "n_evaluable": 0,
                         "evaluable_weight": 0.0,
                         "excluded_weight": None,
                         "correct_weight": None,
@@ -145,6 +156,11 @@ def compare_batches(
                 n_samples = acc.n_samples
                 total_weight = acc.total_weight
                 per_model[model.batch_name] = {
+                    "default_accuracy": (
+                        None
+                        if group_report.metrics is None
+                        else group_report.metrics.accuracy
+                    ),
                     "n_evaluable": group_report.n_samples,
                     "evaluable_weight": acc.evaluable_weight,
                     "excluded_weight": acc.excluded_weight,
@@ -165,6 +181,7 @@ def compare_batches(
         [
             ("sample_set_version", sample_set_version),
             ("group_attr", group_attr),
+            ("scope", scope),
             (
                 "models",
                 [[m.batch_name, m.participating_version] for m in models],

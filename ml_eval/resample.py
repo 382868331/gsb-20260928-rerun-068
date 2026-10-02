@@ -8,11 +8,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Sequence
 
 import numpy as np
 
 from .metrics import MetricSet, multiclass_metrics
-from .predictions import EvaluableRow
 from .versioning import content_version
 
 
@@ -53,11 +53,13 @@ def metric_value(metrics: MetricSet, metric: str) -> float:
 
 
 def bootstrap_ci(
-    rows: tuple[EvaluableRow, ...] | list[EvaluableRow],
+    rows: tuple | list,
     metric: str = "accuracy",
     n_replicates: int = 1000,
     seed: int = 20260929,
     confidence_level: float = 0.95,
+    labels: Sequence[str] | None = None,
+    abstain_label: str | None = None,
 ) -> BootstrapResult:
     rows = list(rows)
     if not rows:
@@ -67,14 +69,21 @@ def bootstrap_ci(
     if not 0.0 < confidence_level < 1.0:
         raise ValueError("confidence_level 必须在 (0, 1) 内")
 
-    point = metric_value(multiclass_metrics(rows), metric)
+    point = metric_value(
+        multiclass_metrics(rows, labels=labels, abstain_label=abstain_label), metric
+    )
     rng = np.random.default_rng(seed)
     n = len(rows)
     values = np.empty(n_replicates, dtype=float)
     for i in range(n_replicates):
         idx = rng.integers(0, n, size=n)
         replicate = [rows[j] for j in idx]
-        values[i] = metric_value(multiclass_metrics(replicate), metric)
+        values[i] = metric_value(
+            multiclass_metrics(
+                replicate, labels=labels, abstain_label=abstain_label
+            ),
+            metric,
+        )
 
     alpha = (1.0 - confidence_level) / 2.0
     lower = float(np.quantile(values, alpha))
@@ -91,8 +100,17 @@ def bootstrap_ci(
                     n_replicates,
                     seed,
                     confidence_level,
+                    labels,
+                    abstain_label,
                     [
-                        [r.sample_id, r.label, r.predicted, r.weight]
+                        [
+                            r.sample_id,
+                            r.label,
+                            r.predicted,
+                            r.weight,
+                            getattr(r, "status", None),
+                            getattr(r, "score", None),
+                        ]
                         for r in rows_sorted
                     ],
                 ],
@@ -104,6 +122,79 @@ def bootstrap_ci(
         point=point,
         lower=lower,
         upper=upper,
+        n_replicates=n_replicates,
+        seed=seed,
+        confidence_level=confidence_level,
+        replicate_version=replicate_version,
+    )
+
+
+def bootstrap_weighted_stat(
+    rows: tuple | list,
+    value_fn,
+    stat_name: str,
+    n_replicates: int = 1000,
+    seed: int = 20260929,
+    confidence_level: float = 0.95,
+) -> BootstrapResult:
+    """对任意“每行携带权重”的加权均值统计做固定种子 bootstrap。
+
+    ``value_fn(row)`` 返回该行的单位贡献（如代价/收益）；统计量为
+    ``sum(value*weight)/sum(weight)``，覆盖率、单位样本损失等都复用它，
+    保证阈值扫描里所有区间使用同一套抽样与版本规则。
+    """
+    rows = list(rows)
+    if not rows:
+        raise ValueError("没有可重采样的行")
+    if n_replicates <= 0:
+        raise ValueError("n_replicates 必须为正整数")
+    if not 0.0 < confidence_level < 1.0:
+        raise ValueError("confidence_level 必须在 (0, 1) 内")
+
+    def weighted_mean(sample_rows):
+        total_w = sum(r.weight for r in sample_rows)
+        if total_w <= 0:
+            return 0.0
+        return sum(value_fn(r) * r.weight for r in sample_rows) / total_w
+
+    point = weighted_mean(rows)
+    rng = np.random.default_rng(seed)
+    n = len(rows)
+    values = np.empty(n_replicates, dtype=float)
+    for i in range(n_replicates):
+        idx = rng.integers(0, n, size=n)
+        values[i] = weighted_mean([rows[j] for j in idx])
+
+    alpha = (1.0 - confidence_level) / 2
+    rows_sorted = sorted(rows, key=lambda r: r.sample_id)
+    replicate_version = content_version(
+        [
+            (
+                "bootstrap",
+                [
+                    stat_name,
+                    n_replicates,
+                    seed,
+                    confidence_level,
+                    [
+                        [
+                            r.sample_id,
+                            r.weight,
+                            value_fn(r),
+                            getattr(r, "status", None),
+                            getattr(r, "threshold", None),
+                        ]
+                        for r in rows_sorted
+                    ],
+                ],
+            )
+        ]
+    )
+    return BootstrapResult(
+        metric=stat_name,
+        point=float(point),
+        lower=float(np.quantile(values, alpha)),
+        upper=float(np.quantile(values, 1.0 - alpha)),
         n_replicates=n_replicates,
         seed=seed,
         confidence_level=confidence_level,

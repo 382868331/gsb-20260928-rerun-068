@@ -32,6 +32,7 @@ class EvaluableRow:
     label: str
     predicted: str
     weight: float
+    score: float | None = None
 
 
 @dataclass(frozen=True)
@@ -128,7 +129,15 @@ class PredictionBatch:
                 unknown_label_rows.append((sid, label_token(chosen)))
                 weight_unknown_label += sample.weight
                 continue
-            rows.append(EvaluableRow(sid, sample.label, chosen.predicted, sample.weight))
+            rows.append(
+                EvaluableRow(
+                    sid,
+                    sample.label,
+                    chosen.predicted,
+                    sample.weight,
+                    chosen.score,
+                )
+            )
 
         for sid in missing:
             weight_missing += sample_set.get(sid).weight
