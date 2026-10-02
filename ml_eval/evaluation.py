@@ -10,10 +10,43 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .metrics import MetricSet, multiclass_metrics
-from .predictions import AlignmentSummary, EvaluableRow, PredictionBatch
+from .predictions import (
+    EXCLUDED_PREDICTION,
+    AlignmentSummary,
+    EvaluableRow,
+    PredictionBatch,
+)
 from .resample import BootstrapResult, bootstrap_ci
 from .samples import SampleSet
 from .versioning import content_version
+
+
+SCOPES = ("all_samples", "evaluable")
+DEFAULT_SCOPE = "all_samples"
+
+
+def scope_rows(batch: PredictionBatch, scope: str) -> list[EvaluableRow]:
+    """按参与范围取行：默认成绩与分组、区间都使用这同一个集合。
+
+    - ``evaluable``：诊断口径，仅合法预测行；
+    - ``all_samples``：全样本口径，缺预测/冲突/未知类别的样本以占位预测
+      计入（按错误处理），不会被悄悄剔除而抬高成绩。
+    """
+    if scope not in SCOPES:
+        raise ValueError(f"未知参与范围: {scope}，可选 {SCOPES}")
+    rows = list(batch.evaluable_rows)
+    if scope == "evaluable":
+        return rows
+    quality = batch.summary
+    excluded_ids = set(quality.missing_sample_ids)
+    excluded_ids.update(sid for sid, _ in quality.conflicting_rows)
+    excluded_ids.update(sid for sid, _ in quality.unknown_label_rows)
+    for sid in sorted(excluded_ids):
+        sample = batch.sample_set.get(sid)
+        rows.append(
+            EvaluableRow(sid, sample.label, EXCLUDED_PREDICTION, sample.weight)
+        )
+    return sorted(rows, key=lambda r: r.sample_id)
 
 
 @dataclass(frozen=True)
@@ -23,11 +56,13 @@ class GroupReport:
     metrics: MetricSet | None
     confidence: BootstrapResult | None = None
     accounting: "Accounting | None" = None
+    scope: str = DEFAULT_SCOPE
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
             "group": self.group,
             "n_samples": self.n_samples,
+            "scope": self.scope,
             "metrics": None if self.metrics is None else self.metrics.to_dict(),
         }
         if self.accounting is not None:
@@ -64,10 +99,12 @@ class Accounting:
     unknown_label_weight: float
     accuracy_all_samples: float
     accuracy_evaluable: float | None
+    n_evaluable: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "n_samples": self.n_samples,
+            "n_evaluable": self.n_evaluable,
             "total_weight": self.total_weight,
             "evaluable_weight": self.evaluable_weight,
             "correct_weight": self.correct_weight,
@@ -85,6 +122,7 @@ class EvaluationReport:
     sample_set_version: str
     prediction_batch_version: str
     participating_version: str
+    scope: str
     sample_ids: tuple[str, ...]
     data_quality: AlignmentSummary
     accounting: Accounting
@@ -96,6 +134,7 @@ class EvaluationReport:
             "sample_set_version": self.sample_set_version,
             "prediction_batch_version": self.prediction_batch_version,
             "participating_version": self.participating_version,
+            "scope": self.scope,
             "sample_ids": list(self.sample_ids),
             "data_quality": self.data_quality.to_dict(),
             "accounting": self.accounting.to_dict(),
@@ -111,6 +150,7 @@ def _group_value(sample, group_attr: str) -> str:
 
 def _accounting_for(
     n_samples: int,
+    n_evaluable: int,
     total_weight: float,
     evaluable_weight: float,
     correct_weight: float,
@@ -121,6 +161,7 @@ def _accounting_for(
 ) -> Accounting:
     return Accounting(
         n_samples=n_samples,
+        n_evaluable=n_evaluable,
         total_weight=total_weight,
         evaluable_weight=evaluable_weight,
         correct_weight=correct_weight,
@@ -140,10 +181,14 @@ def evaluate_batch(
     n_replicates: int = 1000,
     seed: int = 20260929,
     confidence_level: float = 0.95,
+    scope: str = DEFAULT_SCOPE,
 ) -> EvaluationReport:
-    rows = batch.evaluable_rows
+    # 默认成绩、分组与置信区间都基于同一个明确选定的参与范围；
+    # 仅在可评估样本上的诊断口径只在 accounting 中单独标注。
+    rows = scope_rows(batch, scope)
     sample_set: SampleSet = batch.sample_set
     quality = batch.summary
+    excluded_labels = (EXCLUDED_PREDICTION,) if scope == "all_samples" else ()
 
     def confidence(sub_rows: list[EvaluableRow]) -> BootstrapResult | None:
         if bootstrap_metric is None or not sub_rows:
@@ -154,13 +199,15 @@ def evaluate_batch(
             n_replicates=n_replicates,
             seed=seed,
             confidence_level=confidence_level,
+            exclude_labels=excluded_labels,
         )
 
     overall = GroupReport(
         group=None,
         n_samples=len(rows),
-        metrics=multiclass_metrics(rows),
+        metrics=multiclass_metrics(rows, excluded_labels),
         confidence=confidence(list(rows)),
+        scope=scope,
     )
 
     groups: list[GroupReport] = []
@@ -199,18 +246,28 @@ def evaluate_batch(
                 for sample in g_samples
                 if sample.sample_id in unknown_label_ids
             )
-            g_evaluable = sum(r.weight for r in sub_rows)
+            # 对账权重只统计合法预测行；占位行只进入指标与区间，不进账目。
+            g_evaluable = sum(
+                r.weight for r in sub_rows if r.predicted != EXCLUDED_PREDICTION
+            )
             g_correct = sum(r.weight for r in sub_rows if r.predicted == r.label)
-            g_metrics = multiclass_metrics(sub_rows) if sub_rows else None
+            g_metrics = (
+                multiclass_metrics(sub_rows, excluded_labels) if sub_rows else None
+            )
             g_accounting = _accounting_for(
                 n_samples=len(g_samples),
+                n_evaluable=sum(
+                    1 for r in sub_rows if r.predicted != EXCLUDED_PREDICTION
+                ),
                 total_weight=g_total,
                 evaluable_weight=g_evaluable,
                 correct_weight=g_correct,
                 missing_weight=g_missing,
                 conflicting_weight=g_conflicting,
                 unknown_label_weight=g_unknown_label,
-                evaluable_accuracy=None if g_metrics is None else g_metrics.accuracy,
+                evaluable_accuracy=(
+                    g_correct / g_evaluable if g_evaluable > 0 else None
+                ),
             )
             groups.append(
                 GroupReport(
@@ -219,26 +276,35 @@ def evaluate_batch(
                     metrics=g_metrics,
                     confidence=confidence(sub_rows),
                     accounting=g_accounting,
+                    scope=scope,
                 )
             )
 
-    correct_weight = sum(r.weight for r in rows if r.predicted == r.label)
+    correct_weight = sum(
+        r.weight for r in rows if r.predicted == r.label
+    )
     total_weight = quality.total_weight_samples
     accounting = _accounting_for(
         n_samples=quality.n_samples,
+        n_evaluable=quality.n_evaluable,
         total_weight=total_weight,
         evaluable_weight=quality.total_weight_evaluable,
         correct_weight=correct_weight,
         missing_weight=quality.total_weight_missing,
         conflicting_weight=quality.total_weight_conflicting,
         unknown_label_weight=quality.total_weight_unknown_label,
-        evaluable_accuracy=overall.metrics.accuracy,
+        evaluable_accuracy=(
+            correct_weight / quality.total_weight_evaluable
+            if quality.total_weight_evaluable > 0
+            else None
+        ),
     )
 
     participating_version = content_version(
         [
             ("sample_set_version", sample_set.version),
             ("prediction_batch_version", batch.version),
+            ("scope", scope),
             ("duplicate_policy", "identical-fold-conflicting-excluded-order-independent"),
             (
                 "participating_rows",
@@ -259,6 +325,7 @@ def evaluate_batch(
         sample_set_version=sample_set.version,
         prediction_batch_version=batch.version,
         participating_version=participating_version,
+        scope=scope,
         sample_ids=tuple(r.sample_id for r in rows),
         data_quality=quality,
         accounting=accounting,

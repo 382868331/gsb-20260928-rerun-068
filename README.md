@@ -31,12 +31,41 @@
 
 ## 两种准确率口径
 
-- `accuracy_evaluable`：仅在可评估样本上计算的诊断视角；
-- `accuracy_all_samples`：全样本口径，缺预测/冲突/未知类别一律按错误计。
+参与范围（`--scope`）显式选定，**默认成绩与所选范围一致**：
+
+- `all_samples`（默认）：全样本口径，缺预测/冲突/未知类别一律按错误计。
+  主指标、分组指标与置信区间都基于这同一个全样本集合，不会暗中换用
+  较小的可评估集合；被排除样本以占位类别 `__excluded__` 留在混淆矩阵中
+  对账，但不进入 per-class 与 macro/weighted 平均。
+- `evaluable`：仅在可评估样本上计算的**诊断口径**，在主报告
+  `accounting.accuracy_evaluable` 中单独标注，永远不充当默认成绩。
 
 总体与每个分组都带 `accounting`，列出 total/evaluable/correct/excluded 及
 missing/conflicting/unknown_label 的权重去向，分组账目加总等于总体账目；
-没有任何可评估行的分组仍然呈现（`metrics` 与置信区间为 null）。
+诊断口径下没有任何可评估行的分组仍然呈现（`metrics` 与置信区间为 null）。
+
+## 带拒答策略的阈值比较
+
+预测带 `score` 列时，可以按阈值扫描拒答策略：分数低于阈值的样本主动拒答，
+缺预测、冲突预测、未知类别与无分数预测同样视为拒答并分开计数。用户为
+正确接受、错误接受与主动拒答分别设定代价（`--cost-correct/--cost-wrong/
+--cost-abstain`），每个阈值输出覆盖率、损失、受影响分组与平均损失的
+bootstrap 区间；人数、权重、代价与区间在同一份决策清单上对账。
+
+阈值选择（selection）与最终核对（final）的资料分别留存、分别版本化：
+最优阈值只在 selection 资料上确定（损失最小，并列取覆盖率更高者），final
+资料只用于核对，结构上没有从 final 反向挑阈值的入口。每个模型在每份
+数据集上的全部阈值结果都不可变地保留在报告中，旧策略结果不会被后来的
+阈值评估替换。
+
+```bash
+python -m ml_eval \
+  --samples final_samples.csv --model model_a=final_a.csv --model model_b=final_b.csv \
+  --selection-samples sel_samples.csv \
+  --selection-model model_a=sel_a.csv --selection-model model_b=sel_b.csv \
+  --thresholds 0.3,0.5,0.7 --cost-correct 0 --cost-wrong 5 --cost-abstain 1 \
+  --group region -o abstention_study.json
+```
 
 ## 本地使用
 

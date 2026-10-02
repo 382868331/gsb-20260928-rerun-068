@@ -58,6 +58,7 @@ def bootstrap_ci(
     n_replicates: int = 1000,
     seed: int = 20260929,
     confidence_level: float = 0.95,
+    exclude_labels: tuple[str, ...] = (),
 ) -> BootstrapResult:
     rows = list(rows)
     if not rows:
@@ -67,14 +68,14 @@ def bootstrap_ci(
     if not 0.0 < confidence_level < 1.0:
         raise ValueError("confidence_level 必须在 (0, 1) 内")
 
-    point = metric_value(multiclass_metrics(rows), metric)
+    point = metric_value(multiclass_metrics(rows, exclude_labels), metric)
     rng = np.random.default_rng(seed)
     n = len(rows)
     values = np.empty(n_replicates, dtype=float)
     for i in range(n_replicates):
         idx = rng.integers(0, n, size=n)
         replicate = [rows[j] for j in idx]
-        values[i] = metric_value(multiclass_metrics(replicate), metric)
+        values[i] = metric_value(multiclass_metrics(replicate, exclude_labels), metric)
 
     alpha = (1.0 - confidence_level) / 2.0
     lower = float(np.quantile(values, alpha))
@@ -91,6 +92,7 @@ def bootstrap_ci(
                     n_replicates,
                     seed,
                     confidence_level,
+                    list(exclude_labels),
                     [
                         [r.sample_id, r.label, r.predicted, r.weight]
                         for r in rows_sorted

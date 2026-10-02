@@ -148,7 +148,7 @@ def test_replicate_version_tracks_labels_and_weights():
 
 def test_overall_metrics_hand_computed():
     batch = PredictionBatch(make_predictions(), make_samples())
-    report = evaluate_batch(batch, group_attr="region")
+    report = evaluate_batch(batch, group_attr="region", scope="evaluable")
     m = report.overall.metrics
 
     # 参与计算权重 1+2+1+1+3=8；正确权重 1+1+3=5
@@ -170,7 +170,9 @@ def test_overall_metrics_hand_computed():
 
 
 def test_group_metrics_are_computed_independently():
-    report = evaluate_batch(PredictionBatch(make_predictions(), make_samples()), "region")
+    report = evaluate_batch(
+        PredictionBatch(make_predictions(), make_samples()), "region", scope="evaluable"
+    )
     groups = {g.group: g for g in report.groups}
     # x: s1 对(1), s2 错(2), s5 对(3) -> 4/6
     assert groups["x"].n_samples == 3
@@ -220,9 +222,11 @@ def test_no_evaluable_rows_still_reports_quality():
     samples = SampleSet([Sample("s1", "A")])
     batch = PredictionBatch([Prediction("s1", "Z")], samples)
     report = evaluate_batch(batch)
-    assert report.overall.n_samples == 0
+    # 默认全样本口径：未知类别样本按错误计入，成绩为 0 而非缺失
+    assert report.overall.n_samples == 1
     assert report.data_quality.n_unknown_predicted_labels == 1
     assert report.overall.metrics.accuracy == 0.0
+    assert report.accounting.accuracy_evaluable is None
 
 
 def make_samples_with_empty_group():
@@ -239,7 +243,9 @@ def make_samples_with_empty_group():
 def test_group_without_evaluable_rows_is_still_listed():
     samples = make_samples_with_empty_group()
     preds = [Prediction("s1", "A"), Prediction("s2", "A")]
-    report = evaluate_batch(PredictionBatch(preds, samples), "region")
+    report = evaluate_batch(
+        PredictionBatch(preds, samples), "region", scope="evaluable"
+    )
     groups = {g.group: g for g in report.groups}
     assert set(groups) == {"x", "z"}
     empty = groups["z"]
@@ -254,6 +260,39 @@ def test_group_without_evaluable_rows_is_still_listed():
     assert acc.evaluable_weight == 0.0
     assert acc.accuracy_all_samples == 0.0
     assert acc.accuracy_evaluable is None
+
+
+def test_default_scope_counts_excluded_as_wrong_everywhere():
+    # 默认（全样本）口径：主指标、分组与区间都基于同一个全样本集合，
+    # 不会暗中换用较小的可评估集合。
+    samples = make_samples_with_empty_group()
+    preds = [Prediction("s1", "A"), Prediction("s2", "A")]
+    report = evaluate_batch(
+        PredictionBatch(preds, samples),
+        "region",
+        bootstrap_metric="accuracy",
+        n_replicates=50,
+        seed=5,
+    )
+    assert report.scope == "all_samples"
+    # 主指标默认就是全样本成绩：正确权重 1 / 总权重 8
+    assert report.overall.metrics.accuracy == pytest.approx(1.0 / 8.0)
+    assert report.overall.metrics.accuracy == pytest.approx(
+        report.accounting.accuracy_all_samples
+    )
+    # 诊断口径单独标注，不与默认成绩混淆
+    assert report.accounting.accuracy_evaluable == pytest.approx(1.0 / 3.0)
+    # 区间点估计同样落在全样本口径上
+    assert report.overall.confidence.point == pytest.approx(1.0 / 8.0)
+    groups = {g.group: g for g in report.groups}
+    z = groups["z"]
+    assert z.n_samples == 2  # 整组缺预测也按错误计入，而不是消失
+    assert z.metrics.accuracy == 0.0
+    assert z.confidence is not None
+    # 占位类别留在混淆矩阵里对账，但不污染 per-class 与平均指标
+    assert "__excluded__" not in z.metrics.per_class
+    assert "__excluded__" not in z.metrics.labels
+    assert "__excluded__" in z.metrics.confusion["A"]
 
 
 def test_group_accounting_reconciles_with_overall():
@@ -296,15 +335,30 @@ def test_group_accounting_reconciles_with_overall():
         assert sum(getattr(g.accounting, field) for g in report.groups) == pytest.approx(
             getattr(overall, field)
         )
-    # 区间说明与计数同源：重采样参与行就是可评估集合
     report_ci = evaluate_batch(
         PredictionBatch(preds, samples), "region", "accuracy", n_replicates=50, seed=3
     )
     assert report_ci.overall.confidence.point == pytest.approx(
-        report_ci.accounting.accuracy_evaluable
+        report_ci.accounting.accuracy_all_samples
     )
+    # 全样本口径下 y 组也参与区间（缺预测/冲突/未知类别按错误计）
     y = {g.group: g for g in report_ci.groups}["y"]
-    assert y.confidence is None  # y 组无可评估行，不产生区间
+    assert y.confidence is not None
+    assert y.confidence.point == 0.0
+    # 诊断口径下 y 组无可评估行，不产生区间
+    report_diag = evaluate_batch(
+        PredictionBatch(preds, samples),
+        "region",
+        "accuracy",
+        n_replicates=50,
+        seed=3,
+        scope="evaluable",
+    )
+    assert report_diag.overall.confidence.point == pytest.approx(
+        report_diag.accounting.accuracy_evaluable
+    )
+    y_diag = {g.group: g for g in report_diag.groups}["y"]
+    assert y_diag.confidence is None
 
 
 def test_compare_models_with_different_coverage():

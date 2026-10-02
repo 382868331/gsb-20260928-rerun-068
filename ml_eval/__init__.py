@@ -10,6 +10,13 @@ from .metrics import binary_metrics, multiclass_metrics, confusion_counts
 from .resample import bootstrap_ci
 from .evaluation import Accounting, GroupReport, evaluate_batch
 from .comparison import ComparisonReport, ModelEntry, compare_batches
+from .abstention import (
+    AbstentionStudy,
+    CostModel,
+    ThresholdResult,
+    evaluate_abstention,
+    run_abstention_study,
+)
 
 __all__ = [
     "Sample",
@@ -27,6 +34,11 @@ __all__ = [
     "ComparisonReport",
     "ModelEntry",
     "compare_batches",
+    "CostModel",
+    "ThresholdResult",
+    "AbstentionStudy",
+    "evaluate_abstention",
+    "run_abstention_study",
 ]
 
 __version__ = "0.1.0"

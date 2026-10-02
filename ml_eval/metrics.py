@@ -79,10 +79,20 @@ def confusion_counts(
     return matrix
 
 
-def multiclass_metrics(rows: Iterable) -> MetricSet:
+def multiclass_metrics(
+    rows: Iterable, exclude_labels: Iterable[str] = ()
+) -> MetricSet:
+    """加权多分类指标。
+
+    ``exclude_labels`` 中的预测类别（如全样本口径的占位类别）保留在混淆
+    矩阵里以便对账，但不作为真实类别进入 per-class 与 macro/weighted 平均；
+    它们对应的样本仍计入 accuracy 的分母（且永远不会被判为正确）。
+    """
     rows = list(rows)
-    labels = tuple(sorted({r.label for r in rows} | {r.predicted for r in rows}))
-    matrix = confusion_counts(rows, labels)
+    excluded = set(exclude_labels)
+    all_labels = tuple(sorted({r.label for r in rows} | {r.predicted for r in rows}))
+    matrix = confusion_counts(rows, all_labels)
+    labels = tuple(label for label in all_labels if label not in excluded)
     total = sum(r.weight for r in rows)
     correct = sum(matrix[l][l] for l in labels)
 

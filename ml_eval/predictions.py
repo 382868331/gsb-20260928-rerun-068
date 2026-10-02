@@ -32,6 +32,12 @@ class EvaluableRow:
     label: str
     predicted: str
     weight: float
+    score: float | None = None
+
+
+# 全样本口径下，被排除样本（缺预测/冲突/未知类别）的占位预测类别：
+# 它们一律按错误计入，但不会作为真实类别进入 per-class 与平均指标。
+EXCLUDED_PREDICTION = "__excluded__"
 
 
 @dataclass(frozen=True)
@@ -128,7 +134,9 @@ class PredictionBatch:
                 unknown_label_rows.append((sid, label_token(chosen)))
                 weight_unknown_label += sample.weight
                 continue
-            rows.append(EvaluableRow(sid, sample.label, chosen.predicted, sample.weight))
+            rows.append(
+                EvaluableRow(sid, sample.label, chosen.predicted, sample.weight, chosen.score)
+            )
 
         for sid in missing:
             weight_missing += sample_set.get(sid).weight

@@ -57,6 +57,7 @@ class ComparisonReport:
     sample_set_version: str
     comparison_version: str
     group_attr: str | None
+    scope: str
     models: tuple[ModelEntry, ...]
     groups: tuple[GroupComparisonRow, ...]
 
@@ -65,6 +66,7 @@ class ComparisonReport:
             "sample_set_version": self.sample_set_version,
             "comparison_version": self.comparison_version,
             "group_attr": self.group_attr,
+            "scope": self.scope,
             "models": [m.to_dict() for m in self.models],
             "groups": [g.to_dict() for g in self.groups],
         }
@@ -77,6 +79,7 @@ def compare_batches(
     n_replicates: int = 1000,
     seed: int = 20260929,
     confidence_level: float = 0.95,
+    scope: str = "all_samples",
 ) -> ComparisonReport:
     batches = list(batches)
     if not batches:
@@ -99,6 +102,7 @@ def compare_batches(
             n_replicates=n_replicates,
             seed=seed,
             confidence_level=confidence_level,
+            scope=scope,
         )
         reports[batch.batch_name] = report
         accounting = report.accounting
@@ -145,7 +149,7 @@ def compare_batches(
                 n_samples = acc.n_samples
                 total_weight = acc.total_weight
                 per_model[model.batch_name] = {
-                    "n_evaluable": group_report.n_samples,
+                    "n_evaluable": acc.n_evaluable,
                     "evaluable_weight": acc.evaluable_weight,
                     "excluded_weight": acc.excluded_weight,
                     "correct_weight": acc.correct_weight,
@@ -165,6 +169,7 @@ def compare_batches(
         [
             ("sample_set_version", sample_set_version),
             ("group_attr", group_attr),
+            ("scope", scope),
             (
                 "models",
                 [[m.batch_name, m.participating_version] for m in models],
@@ -181,6 +186,7 @@ def compare_batches(
         sample_set_version=sample_set_version,
         comparison_version=comparison_version,
         group_attr=group_attr,
+        scope=scope,
         models=tuple(models),
         groups=tuple(group_rows),
     )
