@@ -1,11 +1,12 @@
 """参与范围（scope）：把全样本与可评估样本两种口径显式化。
 
-* ```all_samples```（默认）：样本集里的每一个样本都进入主指标。缺预测、
+* `all_samples`（默认）：样本集里的每一个样本都进入主成绩。缺预测、
   冲突预测、未知预测类别一律落到拒答伪类别并按错误计；
-* ```evaluable```：诊断视角，只包含通过全部校验的行。
+* `evaluable`：诊断视角，只包含通过全部校验的行。
 
-主报告读取到的默认成绩、分组指标与 bootstrap 区间始终使用同一个范围，
-不允许总体用全样本、分组或区间悄悄换成较小的可评估集合。
+主报告读取到的默认成绩（`default_score`）按显式选择的范围计算并标注；
+诊断指标、分组指标与 bootstrap 区间始终基于可评估集合并单独标注，
+不允许诊断集合悄悄代替主成绩。
 """
 
 from __future__ import annotations
@@ -92,4 +93,3 @@ def build_scope_rows(batch, scope: str, abstain_label: str = ABSTAIN_LABEL):
             ScopeRow(sid, sample.label, predicted, sample.weight, status, score)
         )
     return rows
-

@@ -10,13 +10,25 @@ from .metrics import binary_metrics, multiclass_metrics, confusion_counts
 from .resample import bootstrap_ci
 from .evaluation import Accounting, GroupReport, evaluate_batch
 from .comparison import ComparisonReport, ModelEntry, compare_batches
+from .policy import (
+    AbstentionPolicy,
+    CostModel,
+    GroupPolicyResult,
+    GroupStatus,
+    PolicyComparison,
+    PolicyEvaluation,
+    compare_policies,
+    evaluate_policy,
+    fit_abstention_policy,
+)
 
 __all__ = [
     "Sample",
     "SampleSet",
+    "Prediction",
     "PredictionBatch",
     "AlignmentSummary",
-    "EvaluableRows",
+    "EvaluableRow",
     "binary_metrics",
     "multiclass_metrics",
     "confusion_counts",
@@ -27,6 +39,15 @@ __all__ = [
     "ComparisonReport",
     "ModelEntry",
     "compare_batches",
+    "AbstentionPolicy",
+    "CostModel",
+    "GroupPolicyResult",
+    "GroupStatus",
+    "PolicyComparison",
+    "PolicyEvaluation",
+    "fit_abstention_policy",
+    "evaluate_policy",
+    "compare_policies",
 ]
 
 __version__ = "0.1.0"

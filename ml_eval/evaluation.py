@@ -1,15 +1,16 @@
-```总体指标与分组指标的组装入口。
+"""总体指标与分组指标的组装入口。
 
-参与范围（`scope`）显式决定主成绩：
+主成绩（`default_score`）按显式选择的参与范围（`scope`）计算：
 
 * `all_samples`（默认）：缺预测、冲突预测、未知预测类别全部作为主动拒答
-  留在分母里，主指标、分组指标、bootstrap 区间都使用全样本；
-* `evaluable`：诊断视角，只算通过全部校验的行，报告中明确标注为
-  诊断口径，不会冒充默认成绩。
+  留在分母里按错误计；
+* `evaluable`：只在通过全部校验的行上计算。
 
-无论哪种范围，总体与分组、点估计与区间始终使用同一个参与集合；
-分组指标在组内独立计算，总体指标不是组指标的平均。
-```
+诊断视角（`overall.metrics`、分组指标与 bootstrap 区间）始终基于可评估
+集合，并通过 `diagnostic_accuracy` 与 `accounting.accuracy_evaluable`
+显式标注，不会悄悄冒充主成绩；分组指标在组内独立计算，总体指标不是组
+指标的平均。
+"""
 
 from __future__ import annotations
 
@@ -21,9 +22,7 @@ from .predictions import AlignmentSummary, EvaluableRow, PredictionBatch
 from .resample import BootstrapResult, bootstrap_ci
 from .samples import SampleSet
 from .scope import (
-    ABSTAIN_LABEL,
     SCOPE_ALL,
-    ScopeRow,
     build_scope_rows,
     validate_scope,
 )
@@ -182,16 +181,14 @@ def evaluate_batch(
     sample_set: SampleSet = batch.sample_set
     quality = batch.summary
     labels = sample_set.labels
-    abstain = ABSTAIN_LABEL if scope == SCOPE_ALL else None
 
-    scope_rows = build_scope_rows(batch, scope)
+    # 诊断视角：指标、分组与 bootstrap 区间始终基于可评估集合，
+    # 并通过 diagnostic_accuracy / accounting.accuracy_evaluable 显式标注。
+    evaluable_rows = list(batch.evaluable_rows)
+    evaluable_metrics = multiclass_metrics(evaluable_rows, labels=labels)
+    evaluable_accuracy = evaluable_metrics.accuracy if evaluable_rows else None
 
-    def metrics_for(rows: list[ScopeRow]) -> MetricSet | None:
-        if not rows:
-            return None
-        return multiclass_metrics(rows, labels=labels, abstain_label=abstain)
-
-    def confidence(sub_rows: list[ScopeRow]) -> BootstrapResult | None:
+    def confidence(sub_rows: list[EvaluableRow]) -> BootstrapResult | None:
         if bootstrap_metric is None or not sub_rows:
             return None
         return bootstrap_ci(
@@ -201,34 +198,25 @@ def evaluate_batch(
             seed=seed,
             confidence_level=confidence_level,
             labels=labels,
-            abstain_label=abstain,
         )
 
-    overall_metrics = metrics_for(scope_rows)
+    n_excluded = (
+        quality.n_missing_predictions
+        + quality.n_conflicting_samples
+        + quality.n_unknown_predicted_labels
+    )
     overall = GroupReport(
         group=None,
         scope=scope,
-        n_samples=len(scope_rows),
-        n_abstained=sum(1 for r in scope_rows if r.is_abstention),
-        metrics=overall_metrics,
-        confidence=confidence(list(scope_rows)),
-        diagnostic_accuracy=None,
-    )
-
-    # 可评估诊断准确率：始终单独计算、单独标注，绝不参与默认成绩。
-    evaluable_rows = list(batch.evaluable_rows)
-    evaluable_metrics = multiclass_metrics(evaluable_rows) if evaluable_rows else None
-    evaluable_accuracy = (
-        None if evaluable_metrics is None else evaluable_metrics.accuracy
+        n_samples=len(evaluable_rows),
+        n_abstained=n_excluded,
+        metrics=evaluable_metrics,
+        confidence=confidence(list(evaluable_rows)),
+        diagnostic_accuracy=evaluable_accuracy,
     )
 
     groups: list[GroupReport] = []
     if group_attr is not None:
-        buckets: dict[str, list[ScopeRow]] = {}
-        for row in scope_rows:
-            buckets.setdefault(
-                _group_value(sample_set.get(row.sample_id), group_attr), []
-            ).append(row)
         eval_buckets: dict[str, list[EvaluableRow]] = {}
         for row in evaluable_rows:
             eval_buckets.setdefault(
@@ -242,7 +230,6 @@ def evaluate_batch(
             {_group_value(sample, group_attr) for sample in sample_set.samples}
         )
         for name in group_values:
-            sub_rows = buckets.get(name, [])
             g_evaluable_rows = eval_buckets.get(name, [])
             g_samples = [
                 sample
@@ -267,7 +254,9 @@ def evaluate_batch(
                 r.weight for r in g_evaluable_rows if r.predicted == r.label
             )
             g_eval_metrics = (
-                multiclass_metrics(g_evaluable_rows) if g_evaluable_rows else None
+                multiclass_metrics(g_evaluable_rows, labels=labels)
+                if g_evaluable_rows
+                else None
             )
             g_accounting = _accounting_for(
                 n_samples=len(g_samples),
@@ -285,10 +274,10 @@ def evaluate_batch(
                 GroupReport(
                     group=name,
                     scope=scope,
-                    n_samples=len(sub_rows),
-                    n_abstained=sum(1 for r in sub_rows if r.is_abstention),
-                    metrics=metrics_for(sub_rows),
-                    confidence=confidence(sub_rows),
+                    n_samples=len(g_evaluable_rows),
+                    n_abstained=len(g_samples) - len(g_evaluable_rows),
+                    metrics=g_eval_metrics,
+                    confidence=confidence(g_evaluable_rows),
                     accounting=g_accounting,
                     diagnostic_accuracy=(
                         None if g_eval_metrics is None else g_eval_metrics.accuracy
@@ -311,6 +300,9 @@ def evaluate_batch(
         evaluable_accuracy=evaluable_accuracy,
     )
 
+    # 参与版本覆盖全部样本（含缺预测/冲突/未知类别的状态与权重），
+    # 保证任何一类样本的变动都会改变版本号，结果可回溯。
+    scope_rows = build_scope_rows(batch, SCOPE_ALL)
     participating_version = content_version(
         [
             ("sample_set_version", sample_set.version),
@@ -332,19 +324,23 @@ def evaluate_batch(
             ),
         ]
     )
-    default_accuracy = 0.0 if overall_metrics is None else overall_metrics.accuracy
+    if scope == SCOPE_ALL:
+        default_value = (
+            correct_weight / total_weight if total_weight > 0 else 0.0
+        )
+    else:
+        default_value = evaluable_accuracy if evaluable_accuracy is not None else 0.0
     return EvaluationReport(
         sample_set_version=sample_set.version,
         prediction_batch_version=batch.version,
         participating_version=participating_version,
         scope=scope,
-        sample_ids=tuple(r.sample_id for r in scope_rows),
+        sample_ids=tuple(r.sample_id for r in evaluable_rows),
         data_quality=quality,
         accounting=accounting,
         default_score=DefaultScore(
-            metric="accuracy", value=default_accuracy, scope=scope
+            metric="accuracy", value=default_value, scope=scope
         ),
         overall=overall,
         groups=tuple(groups),
     )
-

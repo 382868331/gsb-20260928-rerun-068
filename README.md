@@ -22,6 +22,11 @@
   `prediction_batch_version`、`participating_version` 三个版本号，并给出
   `accounting` 全样本对账：缺预测/冲突/未知类别的权重分母与全样本准确率
   （异常样本按错误计），避免剔除异常后总体指标虚高。
+- `ml_eval/scope.py`：参与范围显式化。主成绩 `default_score` 按显式选择的
+  范围计算：`all_samples`（默认，异常样本按错误计）或 `evaluable`
+  （诊断口径）。诊断指标、分组指标与 bootstrap 区间始终基于可评估集合并
+  通过 `diagnostic_accuracy`/`accounting.accuracy_evaluable` 单独标注，
+  诊断集合不会悄悄代替主成绩。
 - `ml_eval/comparison.py`：多模型并排比较。每个模型先独立走同一套
   `evaluate_batch` 口径，比较层只汇总不重算：`coverage`（可评估权重 /
   全样本权重）把覆盖率不一致摆到明面，可评估口径（诊断视角）与全样本口径
@@ -37,6 +42,39 @@
 总体与每个分组都带 `accounting`，列出 total/evaluable/correct/excluded 及
 missing/conflicting/unknown_label 的权重去向，分组账目加总等于总体账目；
 没有任何可评估行的分组仍然呈现（`metrics` 与置信区间为 null）。
+
+## 拒答策略（分组定版与独立核对）
+
+`ml_eval/policy.py` 支持按分组约束定版拒答策略：
+
+- 研究者显式给出 `CostModel`（错误接受/正确接受/拒答代价）与各组最低
+  覆盖要求（单一数值或 `{组: 要求}`，`"*"` 为缺省）；
+- `fit_abstention_policy` 只在**选择资料**上选阈值：`strategy="uniform"`
+  选一个同时满足各组覆盖要求的统一阈值，`strategy="per_group"` 每组独立
+  选阈值；候选阈值取选择资料中的打分值，满足覆盖要求者中取代价最小；
+- 资料不足（无可用打分预测）的组标记 `undetermined`，可达覆盖率低于要求
+  的组标记 `infeasible`，原因随策略保留；核对时这些组整组按拒答处理并
+  留在总体账目里，不会被悄悄排除；
+- 代价、覆盖要求、阈值、分组状态与选择资料版本共同决定 `policy_version`：
+  更换代价或覆盖要求即形成新策略，旧结果仍可追溯；
+- `evaluate_policy` 把定版策略应用到**独立核对资料**上，只重放决策，
+  不因核对结果不理想而重调阈值；`compare_policies` 在同一核对资料上
+  并排比较统一阈值与分组阈值策略；
+- 缺预测、冲突预测、未知类别按拒答计入人数、覆盖率、代价与 bootstrap
+  区间；分组账目加总等于总体账目。
+
+```python
+from ml_eval import (CostModel, PredictionBatch, fit_abstention_policy,
+                     evaluate_policy, compare_policies)
+
+costs = CostModel(false_accept=2.0, correct_accept=0.0, reject=1.0)
+per_group = fit_abstention_policy(selection_batch, "region", costs,
+                                  {"x": 0.5, "*": 0.3}, strategy="per_group")
+uniform = fit_abstention_policy(selection_batch, "region", costs, 0.5,
+                                strategy="uniform")
+evaluation = evaluate_policy(per_group, holdout_batch)      # 独立核对
+comparison = compare_policies([per_group, uniform], holdout_batch)
+```
 
 ## 本地使用
 

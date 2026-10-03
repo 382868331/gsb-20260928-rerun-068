@@ -142,9 +142,8 @@ def compare_batches(
                     None,
                 )
                 if group_report is None or group_report.accounting is None:
-                per_model[model.batch_name] = {
-                    "default_accuracy": None,
-                    "n_evaluable": 0,
+                    per_model[model.batch_name] = {
+                        "n_evaluable": 0,
                         "evaluable_weight": 0.0,
                         "excluded_weight": None,
                         "correct_weight": None,
@@ -156,11 +155,6 @@ def compare_batches(
                 n_samples = acc.n_samples
                 total_weight = acc.total_weight
                 per_model[model.batch_name] = {
-                    "default_accuracy": (
-                        None
-                        if group_report.metrics is None
-                        else group_report.metrics.accuracy
-                    ),
                     "n_evaluable": group_report.n_samples,
                     "evaluable_weight": acc.evaluable_weight,
                     "excluded_weight": acc.excluded_weight,

@@ -10,6 +10,7 @@ from .evaluation import evaluate_batch
 from .comparison import compare_batches
 from .io import load_predictions, load_samples
 from .predictions import PredictionBatch
+from .scope import SCOPES, SCOPE_ALL
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -25,6 +26,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--batch-name", default="local-batch")
     parser.add_argument("--group", help="分组属性名（对应 g_<名字> 列或 groups 键）")
+    parser.add_argument(
+        "--scope",
+        choices=SCOPES,
+        default=SCOPE_ALL,
+        help="主成绩的参与范围：all_samples（默认，异常按错误计）或 evaluable（诊断口径）",
+    )
     parser.add_argument(
         "--bootstrap-metric",
         default=None,
@@ -64,6 +71,7 @@ def main(argv: list[str] | None = None) -> int:
             n_replicates=args.replicates,
             seed=args.seed,
             confidence_level=args.confidence,
+            scope=args.scope,
         )
     else:
         batch = PredictionBatch(
@@ -78,6 +86,7 @@ def main(argv: list[str] | None = None) -> int:
             n_replicates=args.replicates,
             seed=args.seed,
             confidence_level=args.confidence,
+            scope=args.scope,
         )
     text = json.dumps(report.to_dict(), ensure_ascii=False, indent=2, sort_keys=True)
     if args.output:
