@@ -1,4 +1,4 @@
-```总体指标与分组指标的组装入口。
+"""总体指标与分组指标的组装入口。
 
 参与范围（`scope`）显式决定主成绩：
 
@@ -9,7 +9,7 @@
 
 无论哪种范围，总体与分组、点估计与区间始终使用同一个参与集合；
 分组指标在组内独立计算，总体指标不是组指标的平均。
-```
+"""
 
 from __future__ import annotations
 
@@ -75,6 +75,7 @@ class Accounting:
     """
 
     n_samples: int
+    n_evaluable: int
     total_weight: float
     evaluable_weight: float
     correct_weight: float
@@ -88,6 +89,7 @@ class Accounting:
     def to_dict(self) -> dict[str, Any]:
         return {
             "n_samples": self.n_samples,
+            "n_evaluable": self.n_evaluable,
             "total_weight": self.total_weight,
             "evaluable_weight": self.evaluable_weight,
             "correct_weight": self.correct_weight,
@@ -147,6 +149,7 @@ def _group_value(sample, group_attr: str) -> str:
 
 def _accounting_for(
     n_samples: int,
+    n_evaluable: int,
     total_weight: float,
     evaluable_weight: float,
     correct_weight: float,
@@ -157,6 +160,7 @@ def _accounting_for(
 ) -> Accounting:
     return Accounting(
         n_samples=n_samples,
+        n_evaluable=n_evaluable,
         total_weight=total_weight,
         evaluable_weight=evaluable_weight,
         correct_weight=correct_weight,
@@ -271,6 +275,7 @@ def evaluate_batch(
             )
             g_accounting = _accounting_for(
                 n_samples=len(g_samples),
+                n_evaluable=len(g_evaluable_rows),
                 total_weight=g_total,
                 evaluable_weight=g_evaluable,
                 correct_weight=g_correct,
@@ -302,6 +307,7 @@ def evaluate_batch(
     total_weight = quality.total_weight_samples
     accounting = _accounting_for(
         n_samples=quality.n_samples,
+        n_evaluable=quality.n_evaluable,
         total_weight=total_weight,
         evaluable_weight=quality.total_weight_evaluable,
         correct_weight=correct_weight,
@@ -347,4 +353,3 @@ def evaluate_batch(
         overall=overall,
         groups=tuple(groups),
     )
-

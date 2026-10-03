@@ -58,6 +58,37 @@ python -m ml_eval \
   --group region -o comparison.json
 ```
 
+主成绩默认使用明确的 `--scope all_samples`（全体参与范围）：缺预测、冲突预测、
+未知类别都以拒答伪类别留在主指标、分组指标和区间中。`--scope evaluable` 只作
+诊断视角，报告中始终带有 `scope: evaluable`，不能冒充默认成绩。
+
+## 分组拒答策略定版
+
+研究者可按组设置最低覆盖要求，并设置错误接受、正确接受、拒答三种代价：
+
+```bash
+python -m ml_eval \
+  --samples examples/samples.csv \
+  --selection-predictions selection.csv \
+  --audit-predictions audit.csv \
+  --policy grouped_threshold --group region \
+  --cost-false-accept 2 --cost-correct-accept 0 --cost-abstain 0.5 \
+  --min-coverage x=0.8 --min-coverage y=0.6 \
+  --min-samples z=20 \
+  -o policy.json
+```
+
+阈值扫描只读取 `selection`：候选阈值来自选择资料中实际出现的分数，
+`grouped_threshold` 为每组独立选择，`uniform_threshold` 强制全体共用一个阈值。
+缺分数、缺预测、冲突预测、未知类别都进入拒答与代价分母。若某组资料人数不足，
+该组保留 `undetermined` 与具体原因；若没有阈值能达到覆盖要求，则保留
+`infeasible`、可达到的最高覆盖率和全拒答保守后备，不会删除该组粉饰总体结果。
+
+`audit` 只冻结应用选择阶段的阈值并重新计算人数、权重、覆盖率、加权代价及
+bootstrap 区间；核对覆盖率不满足约束只会标记为 `infeasible`，不会重新换阈值。
+`policy_version` 对代价、覆盖要求、选择样本集和预测批次做内容寻址：更换任一
+参数都会形成新策略，旧策略及其核对结果仍可通过原版本追溯。
+
 ## 可手算核对（examples）
 
 参与计算：s1、s2、s3、s4、s5（s6 缺预测，s7 预测为未知类别 Z，s5 出现一次
