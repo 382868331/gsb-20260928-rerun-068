@@ -144,6 +144,18 @@ class DecisionRow:
             "accepted": self.accepted,
         }
 
+    @staticmethod
+    def from_dict(data: Mapping[str, Any]) -> "DecisionRow":
+        return DecisionRow(
+            sample_id=str(data["sample_id"]),
+            groups=tuple(str(g) for g in data["groups"]),
+            weight=float(data["weight"]),
+            status=str(data["status"]),
+            threshold=data["threshold"],
+            cost=float(data["cost"]),
+            accepted=bool(data["accepted"]),
+        )
+
 
 @dataclass(frozen=True)
 class GroupPolicyResult:
@@ -202,7 +214,22 @@ class GroupPolicyResult:
 
     @staticmethod
     def from_dict(data: Mapping[str, Any]) -> "GroupPolicyResult":
-        """从 to_dict 结果还原（置信区间仅在内存对象间传递，不参与还原）。"""
+        """从 to_dict 结果还原；置信区间随内容一并还原，保证保存重载后一致。"""
+
+        def ci_from(raw: Mapping[str, Any] | None) -> BootstrapResult | None:
+            if raw is None:
+                return None
+            return BootstrapResult(
+                metric=str(raw["metric"]),
+                point=float(raw["point"]),
+                lower=float(raw["lower"]),
+                upper=float(raw["upper"]),
+                n_replicates=int(raw["n_replicates"]),
+                seed=int(raw["seed"]),
+                confidence_level=float(raw["confidence_level"]),
+                replicate_version=str(raw["replicate_version"]),
+            )
+
         return GroupPolicyResult(
             group=data["group"],
             status=str(data["status"]),
@@ -220,6 +247,8 @@ class GroupPolicyResult:
             status_counts=tuple(
                 sorted((str(k), int(v)) for k, v in data["status_counts"].items())
             ),
+            coverage_ci=ci_from(data.get("coverage_ci")),
+            cost_ci=ci_from(data.get("cost_ci")),
         )
 
 
@@ -360,6 +389,10 @@ class PolicyEvaluation:
     overall: GroupPolicyResult
     groups: tuple[GroupPolicyResult, ...]
     decisions: tuple[DecisionRow, ...] = ()
+    n_replicates: int = 1000
+    seed: int = 20260929
+    confidence_level: float = 0.95
+    bootstrap_enabled: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -376,23 +409,138 @@ class PolicyEvaluation:
             "overall": self.overall.to_dict(),
             "groups": [g.to_dict() for g in self.groups],
             "decisions": [d.to_dict() for d in self.decisions],
+            "bootstrap": {
+                "enabled": self.bootstrap_enabled,
+                "n_replicates": self.n_replicates,
+                "seed": self.seed,
+                "confidence_level": self.confidence_level,
+            },
         }
+
+    @staticmethod
+    def from_dict(data: Mapping[str, Any]) -> "PolicyEvaluation":
+        """从 to_dict 结果还原核对结果（保存后重载），并校验内容版本。
+
+        还原出的结果与原结果完全一致（含逐样本决策与置信区间）；
+        evaluation_version 由内容重算，与保存值不一致时拒绝载入。
+        """
+        bootstrap = data.get("bootstrap") or {}
+        evaluation = PolicyEvaluation(
+            policy_version=str(data["policy_version"]),
+            evaluation_version=str(data["evaluation_version"]),
+            strategy=str(data["strategy"]),
+            sample_set_version=str(data["sample_set_version"]),
+            prediction_batch_version=str(data["prediction_batch_version"]),
+            selection_sample_set_version=str(
+                data["selection_sample_set_version"]
+            ),
+            selection_prediction_batch_version=str(
+                data["selection_prediction_batch_version"]
+            ),
+            thresholds_source=str(data["thresholds_source"]),
+            overall=GroupPolicyResult.from_dict(data["overall"]),
+            groups=tuple(
+                GroupPolicyResult.from_dict(g) for g in data["groups"]
+            ),
+            decisions=tuple(
+                DecisionRow.from_dict(d) for d in data.get("decisions", ())
+            ),
+            n_replicates=int(bootstrap.get("n_replicates", 1000)),
+            seed=int(bootstrap.get("seed", 20260929)),
+            confidence_level=float(bootstrap.get("confidence_level", 0.95)),
+            bootstrap_enabled=bool(bootstrap.get("enabled", True)),
+        )
+        recomputed = content_version(
+            [
+                ("policy_version", evaluation.policy_version),
+                ("holdout_sample_set_version", evaluation.sample_set_version),
+                (
+                    "holdout_prediction_batch_version",
+                    evaluation.prediction_batch_version,
+                ),
+                (
+                    "bootstrap",
+                    [
+                        evaluation.n_replicates,
+                        evaluation.seed,
+                        evaluation.confidence_level,
+                        evaluation.bootstrap_enabled,
+                    ],
+                ),
+                ("overall", evaluation.overall.to_dict()),
+                ("groups", [g.to_dict() for g in evaluation.groups]),
+                ("decisions", [d.to_dict() for d in evaluation.decisions]),
+            ]
+        )
+        if recomputed != evaluation.evaluation_version:
+            raise ValueError(
+                "核对结果内容与其 evaluation_version 不一致，拒绝载入"
+            )
+        return evaluation
 
 
 @dataclass(frozen=True)
 class PolicyComparison:
-    """多个定版策略（如统一阈值 vs 分组阈值）在同一核对资料上的并排比较。"""
+    """多个定版策略（如统一阈值 vs 分组阈值）在同一核对资料上的并排比较。
+
+    比较层只汇总各策略独立核对的结果，绝不在核对资料上重选阈值：
+    summary 并排列出各策略的总体代价与覆盖率；unmet_constraints 列出
+    核对资料上实际覆盖率低于最低要求的组；decision_changes 逐样本列出
+    各策略决策不一致的位置。重叠组样本在总体账目中只计一次，缺预测
+    保留在分母；to_dict/from_dict 保证保存重载后结果一致。
+    """
 
     comparison_version: str
     sample_set_version: str
     evaluations: tuple[PolicyEvaluation, ...]
+    summary: tuple[dict[str, Any], ...] = ()
+    unmet_constraints: tuple[dict[str, Any], ...] = ()
+    decision_changes: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "comparison_version": self.comparison_version,
             "sample_set_version": self.sample_set_version,
             "evaluations": [e.to_dict() for e in self.evaluations],
+            "summary": list(self.summary),
+            "unmet_constraints": list(self.unmet_constraints),
+            "decision_changes": list(self.decision_changes),
         }
+
+    @staticmethod
+    def from_dict(data: Mapping[str, Any]) -> "PolicyComparison":
+        """从 to_dict 结果还原比较结果（保存后重载），并校验内容版本。
+
+        重载后的比较结果与原结果完全一致；comparison_version 由内容
+        重算，与保存值不一致时拒绝载入。
+        """
+        comparison = PolicyComparison(
+            comparison_version=str(data["comparison_version"]),
+            sample_set_version=str(data["sample_set_version"]),
+            evaluations=tuple(
+                PolicyEvaluation.from_dict(e) for e in data["evaluations"]
+            ),
+            summary=tuple(data.get("summary", ())),
+            unmet_constraints=tuple(data.get("unmet_constraints", ())),
+            decision_changes=tuple(data.get("decision_changes", ())),
+        )
+        recomputed = content_version(
+            [
+                ("holdout_sample_set_version", comparison.sample_set_version),
+                (
+                    "evaluations",
+                    [e.evaluation_version for e in comparison.evaluations],
+                ),
+                ("summary", list(comparison.summary)),
+                ("unmet_constraints", list(comparison.unmet_constraints)),
+                ("decision_changes", list(comparison.decision_changes)),
+            ]
+        )
+        if recomputed != comparison.comparison_version:
+            raise ValueError(
+                "比较结果内容与其 comparison_version 不一致，拒绝载入"
+            )
+        return comparison
 
 
 def _normalize_group_attrs(
@@ -503,10 +651,10 @@ def _decisions(
             DecisionRow(
                 sample_id=sid,
                 groups=keys,
-                weight=sample.weight,
+                weight=float(sample.weight),
                 status=status,
                 threshold=threshold,
-                cost=cost,
+                cost=float(cost),
                 accepted=accepted,
             )
         )
@@ -525,12 +673,12 @@ def _summarize(
     seed: int,
     confidence_level: float,
 ) -> GroupPolicyResult:
-    total_weight = sum(r.weight for r in rows)
-    accepted_weight = sum(r.weight for r in rows if r.accepted)
-    forced_weight = sum(
-        r.weight for r in rows if r.status in FORCED_ABSTAIN_STATUSES
+    total_weight = float(sum(r.weight for r in rows))
+    accepted_weight = float(sum(r.weight for r in rows if r.accepted))
+    forced_weight = float(
+        sum(r.weight for r in rows if r.status in FORCED_ABSTAIN_STATUSES)
     )
-    total_cost = sum(r.cost * r.weight for r in rows)
+    total_cost = float(sum(r.cost * r.weight for r in rows))
     counts: dict[str, int] = {}
     for r in rows:
         counts[r.status] = counts.get(r.status, 0) + 1
@@ -982,6 +1130,9 @@ def evaluate_policy(
             ("holdout_sample_set_version", holdout_batch.sample_set.version),
             ("holdout_prediction_batch_version", holdout_batch.version),
             ("bootstrap", [n_replicates, seed, confidence_level, bootstrap]),
+            ("overall", overall.to_dict()),
+            ("groups", [g.to_dict() for g in group_results]),
+            ("decisions", [d.to_dict() for d in decisions]),
         ]
     )
     return PolicyEvaluation(
@@ -998,6 +1149,10 @@ def evaluate_policy(
         overall=overall,
         groups=tuple(group_results),
         decisions=tuple(decisions),
+        n_replicates=n_replicates,
+        seed=seed,
+        confidence_level=confidence_level,
+        bootstrap_enabled=bootstrap,
     )
 
 
@@ -1008,7 +1163,15 @@ def compare_policies(
     seed: int = 20260929,
     confidence_level: float = 0.95,
 ) -> PolicyComparison:
-    """在同一核对资料上并排比较多个定版策略（如统一阈值 vs 分组阈值）。"""
+    """在同一核对资料上并排比较多个定版策略（如统一阈值 vs 分组阈值）。
+
+    每个策略独立走 evaluate_policy（只重放冻结阈值，绝不在核对资料上
+    重选阈值），比较层只汇总不重算：summary 并排列出各策略总体代价、
+    覆盖率与各保护组实际覆盖率；unmet_constraints 列出核对资料上实际
+    覆盖率低于最低要求的组；decision_changes 逐样本列出各策略决策不
+    一致的位置。重叠组样本在总体账目中只计一次，缺预测保留在分母；
+    to_dict/from_dict 保存重载后结果完全一致（版本号由内容重算校验）。
+    """
     policies = tuple(policies)
     if not policies:
         raise ValueError("比较至少需要一个策略")
@@ -1025,14 +1188,80 @@ def compare_policies(
         )
         for policy in policies
     )
+    summary: list[dict[str, Any]] = []
+    unmet: list[dict[str, Any]] = []
+    for evaluation in evaluations:
+        overall = evaluation.overall
+        summary.append(
+            {
+                "policy_version": evaluation.policy_version,
+                "strategy": evaluation.strategy,
+                "total_cost": overall.total_cost,
+                "mean_cost": overall.mean_cost,
+                "coverage": overall.coverage,
+                "accepted_weight": overall.accepted_weight,
+                "total_weight": overall.total_weight,
+                "status": overall.status,
+                "group_coverage": {
+                    g.group: g.coverage for g in evaluation.groups
+                },
+            }
+        )
+        for group in evaluation.groups:
+            if (
+                group.coverage is not None
+                and group.coverage + _EPS < group.min_coverage
+            ):
+                unmet.append(
+                    {
+                        "policy_version": evaluation.policy_version,
+                        "strategy": evaluation.strategy,
+                        "group": group.group,
+                        "min_coverage": group.min_coverage,
+                        "actual_coverage": group.coverage,
+                        "shortfall": group.min_coverage - group.coverage,
+                    }
+                )
+    by_sample: dict[str, dict[str, DecisionRow]] = {}
+    for evaluation in evaluations:
+        for row in evaluation.decisions:
+            by_sample.setdefault(row.sample_id, {})[evaluation.policy_version] = row
+    changes: list[dict[str, Any]] = []
+    for sample_id in sorted(by_sample):
+        per_policy = by_sample[sample_id]
+        signatures = {
+            (row.status, row.accepted) for row in per_policy.values()
+        }
+        if len(signatures) <= 1:
+            continue
+        changes.append(
+            {
+                "sample_id": sample_id,
+                "decisions": {
+                    version: {
+                        "status": row.status,
+                        "accepted": row.accepted,
+                        "threshold": row.threshold,
+                        "cost": row.cost,
+                    }
+                    for version, row in sorted(per_policy.items())
+                },
+            }
+        )
     comparison_version = content_version(
         [
             ("holdout_sample_set_version", holdout_batch.sample_set.version),
             ("evaluations", [e.evaluation_version for e in evaluations]),
+            ("summary", summary),
+            ("unmet_constraints", unmet),
+            ("decision_changes", changes),
         ]
     )
     return PolicyComparison(
         comparison_version=comparison_version,
         sample_set_version=holdout_batch.sample_set.version,
         evaluations=evaluations,
+        summary=tuple(summary),
+        unmet_constraints=tuple(unmet),
+        decision_changes=tuple(changes),
     )

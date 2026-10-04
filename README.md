@@ -69,6 +69,15 @@ missing/conflicting/unknown_label 的权重去向，分组账目加总等于总�
   不因核对结果不理想而重调阈值；`compare_policies` 在同一核对资料上
   并排比较统一阈值与分组阈值策略；逐样本决策（含每个样本的全部归属组
   与所用阈值）随 `decisions` 输出；
+- `compare_policies` 支持多个已冻结策略在同一份只读核对资料上的并排
+  比较：`summary` 并排列出各策略总体代价、总体覆盖率与各保护组实际
+  覆盖率；`unmet_constraints` 明确列出核对资料上实际覆盖率低于最低
+  要求的组（含缺口大小）；`decision_changes` 逐样本列出各冻结版本
+  决策不一致的位置。比较层只汇总各策略独立核对的结果，绝不利用核对
+  资料重新选择阈值；重叠组样本在总体账目中只计一次，缺预测保留在
+  分母；`PolicyComparison.to_dict/from_dict` 保存重载后结果完全一致，
+  `comparison_version` 与每个 `evaluation_version` 都由内容重算校验，
+  篡改即拒绝载入；
 - `AbstentionPolicy.to_dict/from_dict` 支持保存后重开：重开时按内容重算
   `policy_version` 并校验一致，重开的策略与原策略产生完全相同的逐样本
   决策；归属组后来修正会改变样本集版本，重新定版得到新策略，旧策略与其
