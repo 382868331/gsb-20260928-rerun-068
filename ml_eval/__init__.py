@@ -13,6 +13,7 @@ from .comparison import ComparisonReport, ModelEntry, compare_batches
 from .policy import (
     AbstentionPolicy,
     CostModel,
+    DecisionRow,
     GroupPolicyResult,
     GroupStatus,
     PolicyComparison,
@@ -41,6 +42,7 @@ __all__ = [
     "compare_batches",
     "AbstentionPolicy",
     "CostModel",
+    "DecisionRow",
     "GroupPolicyResult",
     "GroupStatus",
     "PolicyComparison",

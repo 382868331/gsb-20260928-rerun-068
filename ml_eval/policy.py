@@ -5,13 +5,22 @@
 * 阈值与分组选择只使用 fit_abstention_policy 收到的选择资料；
   evaluate_policy 只把已定版策略应用到核对资料上，绝不根据核对结果
   重新调整阈值或分组；
+* 一个样本可以同时属于多个保护组（例如同时属于某个小样本地区和某个
+  风险等级）：总体账目中每个样本只计一次，各组账目分别核对该样本对
+  本组覆盖约束的贡献，重叠组的账目加总因此可能超过总体，不会把重叠
+  组拆成互斥组来改变原始约束；
+* 同时属于多个组的样本必须通过自己的**所有**组的阈值（取最严者）才会
+  被接受；任一组未确定或不可行时该样本按拒答处理；
 * 代价（错误接受/正确接受/拒答）与各组最低覆盖要求是策略内容的一部分：
   修改任一者都会得到新的 policy_version，旧策略与旧结果仍可追溯；
 * 资料不足（选择资料中无可用打分预测）或约束不可行（可达覆盖率低于最低
   要求）的组保留 undetermined/infeasible 状态与原因；核对时这些组整组
   按拒答处理并留在总体账目里，不会被悄悄排除来美化总体成绩；
+* 不同组的最低覆盖与代价要求可能互相冲突（尤其存在高权重重叠样本时）：
+  不可行的约束组合在 group_statuses 中明确标记并给出可达覆盖率，
+  selection_results 同时保留当前策略实际达到的各组结果；
 * 缺预测、冲突预测、未知预测类别的样本一律按拒答计入人数、覆盖率、
-  代价与区间，分组账目加总等于总体账目。
+  代价与区间；组间无重叠时分组账目加总等于总体账目。
 """
 
 from __future__ import annotations
@@ -99,18 +108,41 @@ class GroupStatus:
             "n_scored": self.n_scored,
         }
 
+    @staticmethod
+    def from_dict(data: Mapping[str, Any]) -> "GroupStatus":
+        return GroupStatus(
+            group=str(data["group"]),
+            status=str(data["status"]),
+            reason=data["reason"],
+            threshold=data["threshold"],
+            min_coverage=float(data["min_coverage"]),
+            max_coverage=data["max_coverage"],
+            n_scored=int(data["n_scored"]),
+        )
+
 
 @dataclass(frozen=True)
 class DecisionRow:
-    """单个样本在策略下的决策结果，携带权重、状态与所用阈值。"""
+    """单个样本在策略下的决策结果，携带权重、状态、所用阈值与全部归属组。"""
 
     sample_id: str
-    group: str
+    groups: tuple[str, ...]
     weight: float
     status: str
     threshold: float | None
     cost: float
     accepted: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "sample_id": self.sample_id,
+            "groups": list(self.groups),
+            "weight": self.weight,
+            "status": self.status,
+            "threshold": self.threshold,
+            "cost": self.cost,
+            "accepted": self.accepted,
+        }
 
 
 @dataclass(frozen=True)
@@ -168,13 +200,35 @@ class GroupPolicyResult:
             "cost_ci": ci_dict(self.cost_ci),
         }
 
+    @staticmethod
+    def from_dict(data: Mapping[str, Any]) -> "GroupPolicyResult":
+        """从 to_dict 结果还原（置信区间仅在内存对象间传递，不参与还原）。"""
+        return GroupPolicyResult(
+            group=data["group"],
+            status=str(data["status"]),
+            reason=data["reason"],
+            threshold=data["threshold"],
+            min_coverage=float(data["min_coverage"]),
+            n_samples=int(data["n_samples"]),
+            total_weight=float(data["total_weight"]),
+            accepted_weight=float(data["accepted_weight"]),
+            abstained_weight=float(data["abstained_weight"]),
+            forced_abstain_weight=float(data["forced_abstain_weight"]),
+            coverage=data["coverage"],
+            mean_cost=data["mean_cost"],
+            total_cost=float(data["total_cost"]),
+            status_counts=tuple(
+                sorted((str(k), int(v)) for k, v in data["status_counts"].items())
+            ),
+        )
+
 
 @dataclass(frozen=True)
 class AbstentionPolicy:
     """定版后的拒答策略：阈值、代价、覆盖要求与选择资料版本。"""
 
     strategy: str
-    group_attr: str | None
+    group_attrs: tuple[str, ...]
     costs: CostModel
     min_coverage_default: float
     min_coverage_by_group: tuple[tuple[str, float], ...]
@@ -205,7 +259,7 @@ class AbstentionPolicy:
     def to_dict(self) -> dict[str, Any]:
         return {
             "strategy": self.strategy,
-            "group_attr": self.group_attr,
+            "group_attrs": list(self.group_attrs),
             "costs": self.costs.to_dict(),
             "min_coverage_default": self.min_coverage_default,
             "min_coverage_by_group": dict(self.min_coverage_by_group),
@@ -218,6 +272,77 @@ class AbstentionPolicy:
             "selection_results": [r.to_dict() for r in self.selection_results],
             "policy_version": self.policy_version,
         }
+
+    @staticmethod
+    def from_dict(data: Mapping[str, Any]) -> "AbstentionPolicy":
+        """从 to_dict 结果还原策略（保存后重开），并校验内容版本未被篡改。
+
+        还原出的策略与原策略产生完全相同的逐样本决策；policy_version
+        由内容重算，与保存值不一致时拒绝载入。
+        """
+        statuses = tuple(
+            GroupStatus.from_dict(s) for s in data["group_statuses"]
+        )
+        costs = CostModel(**data["costs"])
+        group_reqs = tuple(
+            sorted((str(k), float(v)) for k, v in data["min_coverage_by_group"].items())
+        )
+        threshold_table = {
+            str(k): v for k, v in data["thresholds"].items()
+        }
+        policy = AbstentionPolicy(
+            strategy=str(data["strategy"]),
+            group_attrs=tuple(str(a) for a in data["group_attrs"]),
+            costs=costs,
+            min_coverage_default=float(data["min_coverage_default"]),
+            min_coverage_by_group=group_reqs,
+            thresholds=tuple(sorted(threshold_table.items())),
+            group_statuses=statuses,
+            selection_sample_set_version=str(data["selection_sample_set_version"]),
+            selection_prediction_batch_version=str(
+                data["selection_prediction_batch_version"]
+            ),
+            selection_results=tuple(
+                GroupPolicyResult.from_dict(r) for r in data["selection_results"]
+            ),
+            policy_version=str(data["policy_version"]),
+        )
+        recomputed = content_version(
+            [
+                ("strategy", policy.strategy),
+                ("group_attrs", list(policy.group_attrs)),
+                ("costs", policy.costs.to_dict()),
+                ("min_coverage_default", policy.min_coverage_default),
+                ("min_coverage_by_group", list(policy.min_coverage_by_group)),
+                (
+                    "thresholds",
+                    sorted(
+                        (g, None if t is None else float(t))
+                        for g, t in dict(policy.thresholds).items()
+                    ),
+                ),
+                (
+                    "group_statuses",
+                    [
+                        [s.group, s.status, s.reason, s.threshold, s.min_coverage]
+                        for s in policy.group_statuses
+                    ],
+                ),
+                (
+                    "selection_sample_set_version",
+                    policy.selection_sample_set_version,
+                ),
+                (
+                    "selection_prediction_batch_version",
+                    policy.selection_prediction_batch_version,
+                ),
+            ]
+        )
+        if recomputed != policy.policy_version:
+            raise ValueError(
+                "策略内容与其 policy_version 不一致，拒绝载入"
+            )
+        return policy
 
 
 @dataclass(frozen=True)
@@ -234,6 +359,7 @@ class PolicyEvaluation:
     thresholds_source: str
     overall: GroupPolicyResult
     groups: tuple[GroupPolicyResult, ...]
+    decisions: tuple[DecisionRow, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -249,6 +375,7 @@ class PolicyEvaluation:
             "thresholds_source": self.thresholds_source,
             "overall": self.overall.to_dict(),
             "groups": [g.to_dict() for g in self.groups],
+            "decisions": [d.to_dict() for d in self.decisions],
         }
 
 
@@ -268,11 +395,34 @@ class PolicyComparison:
         }
 
 
-def _group_key(sample, group_attr: str | None) -> str:
+def _normalize_group_attrs(
+    group_attr: "str | list[str] | tuple[str, ...] | None",
+) -> tuple[str, ...]:
+    """分组属性可以是一个属性名、属性名列表（样本同时属于多个保护组）或 None。"""
     if group_attr is None:
-        return _ALL_GROUPS
-    value = sample.groups.get(group_attr)
-    return "__unassigned__" if value is None else str(value)
+        return ()
+    if isinstance(group_attr, str):
+        return (group_attr,)
+    attrs = tuple(str(a) for a in group_attr)
+    if len(set(attrs)) != len(attrs):
+        raise ValueError(f"分组属性存在重复: {attrs}")
+    return attrs
+
+
+def _group_keys(sample, group_attrs: tuple[str, ...]) -> tuple[str, ...]:
+    """样本所属的全部保护组键（一个样本可同时属于多个组）。
+
+    单属性时保持裸取值键以兼容既有报告；多属性时使用 属性=取值
+    以避免不同属性的同名取值互相混淆。
+    """
+    if not group_attrs:
+        return (_ALL_GROUPS,)
+    keys: list[str] = []
+    for attr in group_attrs:
+        value = sample.groups.get(attr)
+        token = "__unassigned__" if value is None else str(value)
+        keys.append(token if len(group_attrs) == 1 else f"{attr}={token}")
+    return tuple(keys)
 
 
 def _normalize_min_coverage(
@@ -294,11 +444,16 @@ def _normalize_min_coverage(
 
 def _decisions(
     batch: PredictionBatch,
-    group_attr: str | None,
+    group_attrs: tuple[str, ...],
     costs: CostModel,
     threshold_for,
 ) -> list[DecisionRow]:
-    """对样本集里每一个样本给出决策；异常样本一律按拒答保留在账上。"""
+    """对样本集里每一个样本给出决策；异常样本一律按拒答保留在账上。
+
+    同时属于多个组的样本必须通过自己的所有组的阈值（取最严者）才会被
+    接受；任一组未确定阈值（None）时该样本按拒答处理。每个样本只产生
+    一条决策行，因此总体账目中每个样本只计一次。
+    """
     quality = batch.summary
     sample_set = batch.sample_set
     eval_index = {r.sample_id: r for r in batch.evaluable_rows}
@@ -309,8 +464,13 @@ def _decisions(
     rows: list[DecisionRow] = []
     for sample in sample_set.samples:
         sid = sample.sample_id
-        group = _group_key(sample, group_attr)
-        threshold = threshold_for(group)
+        keys = _group_keys(sample, group_attrs)
+        applicable = [threshold_for(key) for key in keys]
+        threshold = (
+            None
+            if any(t is None for t in applicable)
+            else max(applicable)
+        )
         accepted = False
         if sid in missing_ids:
             status = DECISION_MISSING
@@ -342,7 +502,7 @@ def _decisions(
         rows.append(
             DecisionRow(
                 sample_id=sid,
-                group=group,
+                groups=keys,
                 weight=sample.weight,
                 status=status,
                 threshold=threshold,
@@ -417,21 +577,29 @@ def _summarize(
 
 def fit_abstention_policy(
     selection_batch: PredictionBatch,
-    group_attr: str | None = None,
+    group_attr: "str | list[str] | tuple[str, ...] | None" = None,
     costs: CostModel | None = None,
     min_coverage: float | Mapping[str, float] = 0.0,
     strategy: str = STRATEGY_PER_GROUP,
 ) -> AbstentionPolicy:
     """在选择资料上定版拒答策略。
 
-    `strategy="uniform"` 选一个同时满足各组最低覆盖要求的统一阈值；
-    `strategy="per_group"` 为每组独立选阈值。候选阈值取选择资料中出现的
+    "group_attr" 可以是单个属性名或属性名列表；给出多个属性时一个样本
+    同时属于多个保护组（如地区与风险等级），总体账目仍每个样本只计一次，
+    各组分别核对该样本对本组覆盖约束的贡献，重叠组不会被拆成互斥组。
+    "strategy=\"uniform\"" 选一个同时满足各组最低覆盖要求的统一阈值；
+    "strategy=\"per_group\"" 为每组选阈值。候选阈值取选择资料中出现的
     打分值（外加“全部拒答”），在满足最低覆盖要求的候选中取代价最小者。
+    组间存在重叠样本时各组约束互相耦合：per_group 先以“全部接受”确定
+    各组可达覆盖率上限并标记不可行组，再以坐标下降逐组降低总体代价，
+    最后做联合约束终检；仍不可行的约束组合明确标记 infeasible 并给出
+    可达覆盖率，当前策略实际达到的各组结果保留在 selection_results 中。
     """
     if costs is None:
         raise ValueError("必须显式给出 CostModel（错误接受/正确接受/拒答代价）")
     if strategy not in STRATEGIES:
         raise ValueError(f"未知策略 {strategy!r}，可选: {STRATEGIES}")
+    attrs = _normalize_group_attrs(group_attr)
     default_req, group_reqs = _normalize_min_coverage(min_coverage)
     req_table = dict(group_reqs)
 
@@ -440,38 +608,101 @@ def fit_abstention_policy(
 
     sample_set = selection_batch.sample_set
     groups = sorted(
-        {_group_key(sample, group_attr) for sample in sample_set.samples}
+        {
+            key
+            for sample in sample_set.samples
+            for key in _group_keys(sample, attrs)
+        }
     )
-    eval_rows = list(selection_batch.evaluable_rows)
     scored_by_group: dict[str, list[float]] = {g: [] for g in groups}
-    for row in eval_rows:
+    for row in selection_batch.evaluable_rows:
         if row.score is not None:
-            group = _group_key(sample_set.get(row.sample_id), group_attr)
-            scored_by_group.setdefault(group, []).append(row.score)
+            for key in _group_keys(sample_set.get(row.sample_id), attrs):
+                scored_by_group.setdefault(key, []).append(row.score)
 
-    def group_stats(group: str, threshold: float | None):
+    def coverage_and_cost(
+        threshold_map: Mapping[str, "float | None"],
+    ) -> tuple[dict[str, tuple[float, float]], list[DecisionRow], float]:
+        """给定各组阈值，返回 ({组: (覆盖率, 总权重)}, 决策行, 总体加权代价)。
+
+        总体代价按样本计一次；组覆盖率把重叠样本分别计入其每个归属组。
+        """
         decisions = _decisions(
-            selection_batch, group_attr, costs, lambda g: threshold
+            selection_batch, attrs, costs, lambda g: threshold_map.get(g)
         )
-        sub = [r for r in decisions if r.group == group]
-        total = sum(r.weight for r in sub)
-        accepted = sum(r.weight for r in sub if r.accepted)
-        cost = sum(r.cost * r.weight for r in sub)
-        return (
-            accepted / total if total > 0 else 0.0,
-            cost / total if total > 0 else 0.0,
-            total,
-        )
+        table: dict[str, tuple[float, float]] = {}
+        for group in groups:
+            sub = [r for r in decisions if group in r.groups]
+            total = sum(r.weight for r in sub)
+            accepted = sum(r.weight for r in sub if r.accepted)
+            table[group] = (accepted / total if total > 0 else 0.0, total)
+        total_cost = sum(r.cost * r.weight for r in decisions)
+        return table, decisions, total_cost
 
     statuses: list[GroupStatus] = []
     thresholds: dict[str, float | None] = {}
 
     if strategy == STRATEGY_PER_GROUP:
+        candidates = {
+            g: sorted(set(scored_by_group.get(g, []))) + [math.inf]
+            for g in groups
+        }
+        undetermined = {g for g in groups if not scored_by_group.get(g)}
+        threshold_map: dict[str, float | None] = {
+            g: (None if g in undetermined else min(scored_by_group[g]))
+            for g in groups
+        }
+        # 全部接受（各自最低候选阈值）时各组覆盖率达到可达上限
+        max_cov_table, _, _ = coverage_and_cost(threshold_map)
+        infeasible: dict[str, float] = {}
+        # 不可行组整组拒答会降低与其重叠组的覆盖率，迭代到不动点
+        changed = True
+        while changed:
+            changed = False
+            cov_table, _, _ = coverage_and_cost(threshold_map)
+            for group in groups:
+                if group in undetermined or group in infeasible:
+                    continue
+                if cov_table[group][0] + _EPS < req_for(group):
+                    infeasible[group] = max_cov_table[group][0]
+                    threshold_map[group] = None
+                    changed = True
+        ok_groups = [
+            g for g in groups if g not in undetermined and g not in infeasible
+        ]
+        # 坐标下降：每次只调整一个组，在满足本组覆盖要求的前提下降低总体代价
+        for _ in range(100):
+            stable = True
+            for group in ok_groups:
+                best: tuple[float, float] | None = None
+                for threshold in candidates[group]:
+                    trial = dict(threshold_map)
+                    trial[group] = threshold
+                    cov_table, _, cost = coverage_and_cost(trial)
+                    if cov_table[group][0] + _EPS < req_for(group):
+                        continue
+                    if best is None or cost < best[1] - _EPS:
+                        best = (threshold, cost)
+                if best is not None and threshold_map[group] != best[0]:
+                    threshold_map[group] = best[0]
+                    stable = False
+            if stable:
+                break
+        # 联合约束终检：重叠样本使组间耦合，他组阈值上调可能破坏本组约束
+        changed = True
+        while changed:
+            changed = False
+            cov_table, _, _ = coverage_and_cost(threshold_map)
+            for group in list(ok_groups):
+                if cov_table[group][0] + _EPS < req_for(group):
+                    infeasible[group] = cov_table[group][0]
+                    threshold_map[group] = None
+                    ok_groups.remove(group)
+                    changed = True
         for group in groups:
             req = req_for(group)
-            scores = sorted(set(scored_by_group.get(group, [])))
             n_scored = len(scored_by_group.get(group, []))
-            if not scores:
+            if group in undetermined:
                 statuses.append(
                     GroupStatus(
                         group=group,
@@ -483,64 +714,50 @@ def fit_abstention_policy(
                         n_scored=0,
                     )
                 )
-                thresholds[group] = None
-                continue
-            max_cov, _, _ = group_stats(group, min(scores))
-            best: tuple[float, float, float] | None = None
-            for threshold in scores + [math.inf]:
-                cov, cost, _ = group_stats(group, threshold)
-                if cov + _EPS >= req and (
-                    best is None or cost < best[1] - _EPS
-                ):
-                    best = (threshold, cost, cov)
-            if best is None:
+            elif group in infeasible:
                 statuses.append(
                     GroupStatus(
                         group=group,
                         status=STATUS_INFEASIBLE,
                         reason=(
-                            f"可达覆盖率 {max_cov:.6f} 低于最低要求 {req:.6f}"
+                            f"可达覆盖率 {infeasible[group]:.6f} "
+                            f"低于最低要求 {req:.6f}"
                         ),
                         threshold=None,
                         min_coverage=req,
-                        max_coverage=max_cov,
+                        max_coverage=infeasible[group],
                         n_scored=n_scored,
                     )
                 )
-                thresholds[group] = None
             else:
                 statuses.append(
                     GroupStatus(
                         group=group,
                         status=STATUS_OK,
                         reason=None,
-                        threshold=best[0],
+                        threshold=threshold_map[group],
                         min_coverage=req,
-                        max_coverage=max_cov,
+                        max_coverage=max_cov_table[group][0],
                         n_scored=n_scored,
                     )
                 )
-                thresholds[group] = best[0]
+            thresholds[group] = threshold_map[group]
     else:
         all_scores = sorted(
             {s for scores in scored_by_group.values() for s in scores}
         )
         best_uniform: tuple[float, float] | None = None
         for threshold in all_scores + [math.inf]:
-            feasible = True
-            total_cost_w = 0.0
-            total_w = 0.0
-            for group in groups:
-                cov, cost, w = group_stats(group, threshold)
-                if cov + _EPS < req_for(group):
-                    feasible = False
-                total_cost_w += cost * w
-                total_w += w
-            mean_cost = total_cost_w / total_w if total_w > 0 else 0.0
-            if feasible and (
-                best_uniform is None or mean_cost < best_uniform[1] - _EPS
-            ):
-                best_uniform = (threshold, mean_cost)
+            tmap = {g: threshold for g in groups}
+            cov_table, _, cost = coverage_and_cost(tmap)
+            if all(
+                cov_table[g][0] + _EPS >= req_for(g) for g in groups
+            ) and (best_uniform is None or cost < best_uniform[1] - _EPS):
+                best_uniform = (threshold, cost)
+        min_map: dict[str, float | None] = {
+            g: (min(all_scores) if all_scores else None) for g in groups
+        }
+        max_cov_table, _, _ = coverage_and_cost(min_map)
         if best_uniform is None:
             for group in groups:
                 req = req_for(group)
@@ -558,7 +775,7 @@ def fit_abstention_policy(
                         )
                     )
                     continue
-                max_cov, _, _ = group_stats(group, min(scores))
+                max_cov = max_cov_table[group][0]
                 statuses.append(
                     GroupStatus(
                         group=group,
@@ -597,9 +814,6 @@ def fit_abstention_policy(
             for group in groups:
                 req = req_for(group)
                 scores = scored_by_group.get(group, [])
-                max_cov = (
-                    group_stats(group, min(scores))[0] if scores else None
-                )
                 statuses.append(
                     GroupStatus(
                         group=group,
@@ -607,7 +821,7 @@ def fit_abstention_policy(
                         reason=None,
                         threshold=best_uniform[0],
                         min_coverage=req,
-                        max_coverage=max_cov,
+                        max_coverage=max_cov_table[group][0],
                         n_scored=len(scores),
                     )
                 )
@@ -620,7 +834,7 @@ def fit_abstention_policy(
     )
     selection_decisions = _decisions(
         selection_batch,
-        group_attr,
+        attrs,
         costs,
         lambda g: (
             threshold_table[_ALL_GROUPS]
@@ -630,7 +844,7 @@ def fit_abstention_policy(
     )
     selection_results: list[GroupPolicyResult] = []
     for group in groups:
-        sub = [r for r in selection_decisions if r.group == group]
+        sub = [r for r in selection_decisions if group in r.groups]
         st = next(s for s in statuses if s.group == group)
         selection_results.append(
             _summarize(
@@ -655,7 +869,7 @@ def fit_abstention_policy(
     policy_version = content_version(
         [
             ("strategy", strategy),
-            ("group_attr", group_attr),
+            ("group_attrs", list(attrs)),
             ("costs", costs.to_dict()),
             ("min_coverage_default", default_req),
             ("min_coverage_by_group", list(group_reqs)),
@@ -679,7 +893,7 @@ def fit_abstention_policy(
     )
     return AbstentionPolicy(
         strategy=strategy,
-        group_attr=group_attr,
+        group_attrs=attrs,
         costs=costs,
         min_coverage_default=default_req,
         min_coverage_by_group=group_reqs,
@@ -704,20 +918,21 @@ def evaluate_policy(
 
     阈值与分组完全来自 `policy`（即选择资料），这里只重放决策并汇总，
     不因核对结果不理想而重新调阈值。策略未覆盖的组、未确定或不可行的组
-    整组按拒答处理并保留在总体账目中。
+    整组按拒答处理并保留在总体账目中。同时属于多个组的样本在总体账目
+    中只计一次，并分别计入其每个归属组的组级账目。
     """
     decisions = _decisions(
-        holdout_batch, policy.group_attr, policy.costs, policy.threshold_for
+        holdout_batch, policy.group_attrs, policy.costs, policy.threshold_for
     )
     policy_groups = {
         s.group for s in policy.group_statuses if s.group != _ALL_GROUPS
     }
-    holdout_groups = {r.group for r in decisions}
+    holdout_groups = {key for r in decisions for key in r.groups}
     groups = sorted(policy_groups | holdout_groups)
 
     group_results: list[GroupPolicyResult] = []
     for group in groups:
-        sub = [r for r in decisions if r.group == group]
+        sub = [r for r in decisions if group in r.groups]
         status = policy.status_for(group)
         if status is None:
             g_status = STATUS_UNDETERMINED
@@ -782,6 +997,7 @@ def evaluate_policy(
         thresholds_source="selection",
         overall=overall,
         groups=tuple(group_results),
+        decisions=tuple(decisions),
     )
 
 
