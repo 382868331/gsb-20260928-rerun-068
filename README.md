@@ -63,6 +63,50 @@ missing/conflicting/unknown_label 的权重去向，分组账目加总等于总�
 - 缺预测、冲突预测、未知类别按拒答计入人数、覆盖率、代价与 bootstrap
   区间；分组账目加总等于总体账目。
 
+## 重叠保护组（一个样本可同时属于多组）
+
+`fit_abstention_policy` 传入 `protection_groups` 即开启重叠保护组口径：
+
+- 用 `ProtectionGroupSpec(name, {属性: 取值})` 描述保护组（条件为合取，
+  取值可给单个或多个），同一条记录可以同时属于多个组，例如既属于小样本
+  地区 `{"region": "small"}` 又属于高风险等级 `{"risk": "high"}`；
+- **不把重叠组拆成互斥组**：覆盖约束逐组独立核对，样本权重在它所属的每个
+  组的分子/分母里各出现一次，但总体分母里每个样本只计一次；
+  `sum_group_weight` 与 `overlapping_weight` 显式说明重叠量，每个组结果带
+  `multi_member_weight` 与 `satisfies_min_coverage`；
+- 一条样本的接受阈值取其所属各组阈值的**最大值**（联合接受语义），从而各组
+  都按同一套接受集合核对；阈值向量在选择资料上联合搜索（DFS + 乐观剪枝），
+  在各组覆盖都达标的向量中取总体代价最小；
+- 各组最低覆盖/代价要求互相冲突、没有任何阈值组合能同时满足时，策略总体
+  标记 `infeasible`，每组保留 `optimistic_coverage`（该组独立取最低阈值的
+  上界）、`joint_coverage`（联合定版后实际值）与原因，并保留缺口最小的尽力
+  而为阈值；核对结果如实报告各组实际覆盖，不改动原约束；
+- 归属快照随策略冻结（`frozen_membership` 与 `frozen_membership_version`）。
+  应用于新数据时阈值只重放、绝不重新优化；归属组后来被修正在
+  `membership_drift` 中记录（added/removed/changed/新样本），默认按冻结快照
+  核对以保留总体分母与历史依据，也可显式 `membership_mode="current"` 按当前
+  属性核对（阈值仍冻结）；
+- 缺预测、冲突预测、未知类别、非整数权重全部原样保留在总体与各组分母里；
+- `AbstentionPolicy.to_dict()`/`from_dict()` 可保存重开（全拒答阈值序列化为
+  `"Infinity"`），重开后 `policy_version` 不变，逐样本决策与原策略一致；
+  `PolicyEvaluation.decisions` 与 `decision_for(id)` 给出每个样本的状态、接受
+  与否、所属组与各组实际套用的阈值。
+
+```python
+from ml_eval import ProtectionGroupSpec, fit_abstention_policy, evaluate_policy
+
+specs = [
+    ProtectionGroupSpec("small_region", {"region": "small"}),
+    ProtectionGroupSpec("high_risk", {"risk": ("high", "med")}),
+]
+policy = fit_abstention_policy(
+    selection_batch, costs=costs,
+    min_coverage={"small_region": 0.5, "high_risk": 0.8},
+    strategy="per_group", protection_groups=specs,
+)
+evaluation = evaluate_policy(policy, holdout_batch)  # 冻结阈值，只重放
+```
+
 ```python
 from ml_eval import (CostModel, PredictionBatch, fit_abstention_policy,
                      evaluate_policy, compare_policies)
