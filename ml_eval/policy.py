@@ -144,6 +144,18 @@ class DecisionRow:
             "accepted": self.accepted,
         }
 
+    @staticmethod
+    def from_dict(data: Mapping[str, Any]) -> "DecisionRow":
+        return DecisionRow(
+            sample_id=str(data["sample_id"]),
+            groups=tuple(str(g) for g in data["groups"]),
+            weight=float(data["weight"]),
+            status=str(data["status"]),
+            threshold=data["threshold"],
+            cost=float(data["cost"]),
+            accepted=bool(data["accepted"]),
+        )
+
 
 @dataclass(frozen=True)
 class GroupPolicyResult:
@@ -202,7 +214,22 @@ class GroupPolicyResult:
 
     @staticmethod
     def from_dict(data: Mapping[str, Any]) -> "GroupPolicyResult":
-        """从 to_dict 结果还原（置信区间仅在内存对象间传递，不参与还原）。"""
+        """从 to_dict 结果还原（含 bootstrap 区间），保证保存重载后一致。"""
+
+        def ci_from_dict(ci_data: Any) -> BootstrapResult | None:
+            if ci_data is None:
+                return None
+            return BootstrapResult(
+                metric=str(ci_data["metric"]),
+                point=float(ci_data["point"]),
+                lower=float(ci_data["lower"]),
+                upper=float(ci_data["upper"]),
+                n_replicates=int(ci_data["n_replicates"]),
+                seed=int(ci_data["seed"]),
+                confidence_level=float(ci_data["confidence_level"]),
+                replicate_version=str(ci_data["replicate_version"]),
+            )
+
         return GroupPolicyResult(
             group=data["group"],
             status=str(data["status"]),
@@ -220,6 +247,8 @@ class GroupPolicyResult:
             status_counts=tuple(
                 sorted((str(k), int(v)) for k, v in data["status_counts"].items())
             ),
+            coverage_ci=ci_from_dict(data.get("coverage_ci")),
+            cost_ci=ci_from_dict(data.get("cost_ci")),
         )
 
 
@@ -378,21 +407,263 @@ class PolicyEvaluation:
             "decisions": [d.to_dict() for d in self.decisions],
         }
 
+    @staticmethod
+    def from_dict(data: Mapping[str, Any]) -> "PolicyEvaluation":
+        """从 to_dict 结果还原核对评估（置信区间不参与序列化，还原为 None）。"""
+        return PolicyEvaluation(
+            policy_version=str(data["policy_version"]),
+            evaluation_version=str(data["evaluation_version"]),
+            strategy=str(data["strategy"]),
+            sample_set_version=str(data["sample_set_version"]),
+            prediction_batch_version=str(data["prediction_batch_version"]),
+            selection_sample_set_version=str(
+                data["selection_sample_set_version"]
+            ),
+            selection_prediction_batch_version=str(
+                data["selection_prediction_batch_version"]
+            ),
+            thresholds_source=str(data["thresholds_source"]),
+            overall=GroupPolicyResult.from_dict(data["overall"]),
+            groups=tuple(
+                GroupPolicyResult.from_dict(g) for g in data["groups"]
+            ),
+            decisions=tuple(
+                DecisionRow.from_dict(d) for d in data["decisions"]
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class OverallComparisonRow:
+    """单个冻结版本在留出集上的总体并排指标（每个样本总体只计一次）。"""
+
+    policy_version: str
+    strategy: str
+    status: str
+    reason: str | None
+    n_samples: int
+    total_weight: float
+    accepted_weight: float
+    abstained_weight: float
+    forced_abstain_weight: float
+    coverage: float | None
+    mean_cost: float | None
+    total_cost: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "policy_version": self.policy_version,
+            "strategy": self.strategy,
+            "status": self.status,
+            "reason": self.reason,
+            "n_samples": self.n_samples,
+            "total_weight": self.total_weight,
+            "accepted_weight": self.accepted_weight,
+            "abstained_weight": self.abstained_weight,
+            "forced_abstain_weight": self.forced_abstain_weight,
+            "coverage": self.coverage,
+            "mean_cost": self.mean_cost,
+            "total_cost": self.total_cost,
+        }
+
+    @staticmethod
+    def from_dict(data: Mapping[str, Any]) -> "OverallComparisonRow":
+        return OverallComparisonRow(
+            policy_version=str(data["policy_version"]),
+            strategy=str(data["strategy"]),
+            status=str(data["status"]),
+            reason=data["reason"],
+            n_samples=int(data["n_samples"]),
+            total_weight=float(data["total_weight"]),
+            accepted_weight=float(data["accepted_weight"]),
+            abstained_weight=float(data["abstained_weight"]),
+            forced_abstain_weight=float(data["forced_abstain_weight"]),
+            coverage=data["coverage"],
+            mean_cost=data["mean_cost"],
+            total_cost=float(data["total_cost"]),
+        )
+
+
+@dataclass(frozen=True)
+class GroupCoverageRow:
+    """单个保护组在各冻结版本下的实际覆盖率与达标情况。
+
+    重叠组的样本分别计入其每个归属组；缺预测样本保留在该组分母中。
+    """
+
+    group: str
+    per_policy: tuple[dict[str, Any], ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"group": self.group, "per_policy": list(self.per_policy)}
+
+    @staticmethod
+    def from_dict(data: Mapping[str, Any]) -> "GroupCoverageRow":
+        return GroupCoverageRow(
+            group=str(data["group"]),
+            per_policy=tuple(dict(p) for p in data["per_policy"]),
+        )
+
+
+@dataclass(frozen=True)
+class UnmetConstraint:
+    """某个冻结版本在留出集上未达标的组级覆盖约束。"""
+
+    policy_version: str
+    group: str
+    required_coverage: float
+    actual_coverage: float
+    gap: float
+    total_weight: float
+    accepted_weight: float
+    n_samples: int
+    status: str
+    reason: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "policy_version": self.policy_version,
+            "group": self.group,
+            "required_coverage": self.required_coverage,
+            "actual_coverage": self.actual_coverage,
+            "gap": self.gap,
+            "total_weight": self.total_weight,
+            "accepted_weight": self.accepted_weight,
+            "n_samples": self.n_samples,
+            "status": self.status,
+            "reason": self.reason,
+        }
+
+    @staticmethod
+    def from_dict(data: Mapping[str, Any]) -> "UnmetConstraint":
+        return UnmetConstraint(
+            policy_version=str(data["policy_version"]),
+            group=str(data["group"]),
+            required_coverage=float(data["required_coverage"]),
+            actual_coverage=float(data["actual_coverage"]),
+            gap=float(data["gap"]),
+            total_weight=float(data["total_weight"]),
+            accepted_weight=float(data["accepted_weight"]),
+            n_samples=int(data["n_samples"]),
+            status=str(data["status"]),
+            reason=data["reason"],
+        )
+
+
+@dataclass(frozen=True)
+class DecisionChange:
+    """同一样本在两个冻结版本之间的逐样本决策变化。
+
+    状态相同但所用阈值不同也会列出；缺预测等强制拒答样本保留在留出集上，
+    其决策行参与逐样本对比。
+    """
+
+    sample_id: str
+    weight: float
+    groups: tuple[str, ...]
+    from_policy_version: str
+    to_policy_version: str
+    from_status: str
+    to_status: str
+    from_accepted: bool
+    to_accepted: bool
+    from_threshold: float | None
+    to_threshold: float | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "sample_id": self.sample_id,
+            "weight": self.weight,
+            "groups": list(self.groups),
+            "from_policy_version": self.from_policy_version,
+            "to_policy_version": self.to_policy_version,
+            "from_status": self.from_status,
+            "to_status": self.to_status,
+            "from_accepted": self.from_accepted,
+            "to_accepted": self.to_accepted,
+            "from_threshold": self.from_threshold,
+            "to_threshold": self.to_threshold,
+        }
+
+    @staticmethod
+    def from_dict(data: Mapping[str, Any]) -> "DecisionChange":
+        return DecisionChange(
+            sample_id=str(data["sample_id"]),
+            weight=float(data["weight"]),
+            groups=tuple(str(g) for g in data["groups"]),
+            from_policy_version=str(data["from_policy_version"]),
+            to_policy_version=str(data["to_policy_version"]),
+            from_status=str(data["from_status"]),
+            to_status=str(data["to_status"]),
+            from_accepted=bool(data["from_accepted"]),
+            to_accepted=bool(data["to_accepted"]),
+            from_threshold=data["from_threshold"],
+            to_threshold=data["to_threshold"],
+        )
+
 
 @dataclass(frozen=True)
 class PolicyComparison:
-    """多个定版策略（如统一阈值 vs 分组阈值）在同一核对资料上的并排比较。"""
+    """多个冻结策略在同一只读留出集上的并排比较。
+
+    比较层只重放各策略已定版的阈值并汇总，绝不利用留出集重新选择阈值：
+
+    * ``overall``：各版本总体成本/覆盖率并排（总体账目每个样本只计一次，
+      缺预测等异常样本保留在分母）；
+    * ``groups``：各保护组在各版本下的实际覆盖率与是否达标（重叠组样本
+      分别计入其每个归属组，不拆成互斥组）；
+    * ``unmet_constraints``：留出集上实际覆盖率低于冻结要求的约束清单；
+    * ``decision_changes``：按输入顺序逐对版本比较的逐样本决策变化。
+    """
 
     comparison_version: str
     sample_set_version: str
+    prediction_batch_version: str
     evaluations: tuple[PolicyEvaluation, ...]
+    overall: tuple[OverallComparisonRow, ...]
+    groups: tuple[GroupCoverageRow, ...]
+    unmet_constraints: tuple[UnmetConstraint, ...]
+    decision_changes: tuple[DecisionChange, ...]
+    n_changed_decisions: int
+    n_unchanged_decisions: int
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "comparison_version": self.comparison_version,
             "sample_set_version": self.sample_set_version,
+            "prediction_batch_version": self.prediction_batch_version,
             "evaluations": [e.to_dict() for e in self.evaluations],
+            "overall": [r.to_dict() for r in self.overall],
+            "groups": [g.to_dict() for g in self.groups],
+            "unmet_constraints": [u.to_dict() for u in self.unmet_constraints],
+            "decision_changes": [d.to_dict() for d in self.decision_changes],
+            "n_changed_decisions": self.n_changed_decisions,
+            "n_unchanged_decisions": self.n_unchanged_decisions,
         }
+
+    @staticmethod
+    def from_dict(data: Mapping[str, Any]) -> "PolicyComparison":
+        """从 to_dict 结果还原并排比较，保存重载后结果保持一致。"""
+        return PolicyComparison(
+            comparison_version=str(data["comparison_version"]),
+            sample_set_version=str(data["sample_set_version"]),
+            prediction_batch_version=str(data["prediction_batch_version"]),
+            evaluations=tuple(
+                PolicyEvaluation.from_dict(e) for e in data["evaluations"]
+            ),
+            overall=tuple(
+                OverallComparisonRow.from_dict(r) for r in data["overall"]
+            ),
+            groups=tuple(GroupCoverageRow.from_dict(g) for g in data["groups"]),
+            unmet_constraints=tuple(
+                UnmetConstraint.from_dict(u) for u in data["unmet_constraints"]
+            ),
+            decision_changes=tuple(
+                DecisionChange.from_dict(d) for d in data["decision_changes"]
+            ),
+            n_changed_decisions=int(data["n_changed_decisions"]),
+            n_unchanged_decisions=int(data["n_unchanged_decisions"]),
+        )
 
 
 def _normalize_group_attrs(
@@ -1008,13 +1279,21 @@ def compare_policies(
     seed: int = 20260929,
     confidence_level: float = 0.95,
 ) -> PolicyComparison:
-    """在同一核对资料上并排比较多个定版策略（如统一阈值 vs 分组阈值）。"""
+    """在同一只读留出集上并排比较多个已冻结策略版本。
+
+    每个策略独立走 ``evaluate_policy``（只重放冻结阈值，不用留出集重选阈值），
+    比较层只汇总不重算：总体成本/覆盖率并排、各保护组实际覆盖率与达标核对、
+    未达标约束清单，以及按输入顺序相邻版本逐对比较的逐样本决策变化。
+    重叠组样本总体只计一次、在各组分别计；缺预测等异常样本留在分母中。
+    """
     policies = tuple(policies)
     if not policies:
         raise ValueError("比较至少需要一个策略")
     versions = [p.policy_version for p in policies]
     if len(set(versions)) != len(versions):
         raise ValueError("参与比较的策略版本必须互不相同")
+    holdout_sample_set_version = holdout_batch.sample_set.version
+    holdout_prediction_batch_version = holdout_batch.version
     evaluations = tuple(
         evaluate_policy(
             policy,
@@ -1025,14 +1304,168 @@ def compare_policies(
         )
         for policy in policies
     )
+    for evaluation in evaluations:
+        if evaluation.sample_set_version != holdout_sample_set_version:
+            raise ValueError("参与比较的策略必须在同一份留出样本集上核对")
+        if (
+            evaluation.prediction_batch_version
+            != holdout_prediction_batch_version
+        ):
+            raise ValueError("参与比较的策略必须在同一份留出预测批次上核对")
+
+    overall_rows = tuple(
+        OverallComparisonRow(
+            policy_version=evaluation.policy_version,
+            strategy=evaluation.strategy,
+            status=evaluation.overall.status,
+            reason=evaluation.overall.reason,
+            n_samples=evaluation.overall.n_samples,
+            total_weight=evaluation.overall.total_weight,
+            accepted_weight=evaluation.overall.accepted_weight,
+            abstained_weight=evaluation.overall.abstained_weight,
+            forced_abstain_weight=evaluation.overall.forced_abstain_weight,
+            coverage=evaluation.overall.coverage,
+            mean_cost=evaluation.overall.mean_cost,
+            total_cost=evaluation.overall.total_cost,
+        )
+        for evaluation in evaluations
+    )
+
+    group_order = sorted(
+        {
+            group_result.group
+            for evaluation in evaluations
+            for group_result in evaluation.groups
+        }
+    )
+    group_rows: list[GroupCoverageRow] = []
+    unmet: list[UnmetConstraint] = []
+    for group in group_order:
+        per_policy: list[dict[str, Any]] = []
+        for evaluation in evaluations:
+            group_result = next(
+                (g for g in evaluation.groups if g.group == group), None
+            )
+            if group_result is None:
+                continue
+            meets = (
+                group_result.coverage is not None
+                and group_result.coverage + _EPS
+                >= group_result.min_coverage
+            )
+            per_policy.append(
+                {
+                    "policy_version": evaluation.policy_version,
+                    "strategy": evaluation.strategy,
+                    "status": group_result.status,
+                    "reason": group_result.reason,
+                    "threshold": group_result.threshold,
+                    "n_samples": group_result.n_samples,
+                    "total_weight": group_result.total_weight,
+                    "accepted_weight": group_result.accepted_weight,
+                    "forced_abstain_weight": (
+                        group_result.forced_abstain_weight
+                    ),
+                    "coverage": group_result.coverage,
+                    "min_coverage": group_result.min_coverage,
+                    "mean_cost": group_result.mean_cost,
+                    "total_cost": group_result.total_cost,
+                    "meets_constraint": meets,
+                }
+            )
+            if not meets and group_result.coverage is not None:
+                unmet.append(
+                    UnmetConstraint(
+                        policy_version=evaluation.policy_version,
+                        group=group,
+                        required_coverage=group_result.min_coverage,
+                        actual_coverage=group_result.coverage,
+                        gap=max(
+                            0.0,
+                            group_result.min_coverage - group_result.coverage,
+                        ),
+                        total_weight=group_result.total_weight,
+                        accepted_weight=group_result.accepted_weight,
+                        n_samples=group_result.n_samples,
+                        status=group_result.status,
+                        reason=group_result.reason,
+                    )
+                )
+        group_rows.append(
+            GroupCoverageRow(group=group, per_policy=tuple(per_policy))
+        )
+
+    decision_changes: list[DecisionChange] = []
+    decision_tables = [
+        {row.sample_id: row for row in evaluation.decisions}
+        for evaluation in evaluations
+    ]
+    sample_ids = [sample.sample_id for sample in holdout_batch.sample_set.samples]
+    for pair_index in range(len(decision_tables) - 1):
+        earlier = decision_tables[pair_index]
+        later = decision_tables[pair_index + 1]
+        earlier_version = evaluations[pair_index].policy_version
+        later_version = evaluations[pair_index + 1].policy_version
+        for sample_id in sample_ids:
+            before = earlier[sample_id]
+            after = later[sample_id]
+            # 缺预测/冲突/未知类别/无阈值的强制拒答行，阈值并未参与决策，
+            # 不因两版本“本会适用”的阈值不同而算作逐样本决策变化
+            threshold_acted = (
+                before.status
+                in (
+                    DECISION_ACCEPTED_CORRECT,
+                    DECISION_ACCEPTED_WRONG,
+                    DECISION_ABSTAIN_LOW_SCORE,
+                )
+                or after.status
+                in (
+                    DECISION_ACCEPTED_CORRECT,
+                    DECISION_ACCEPTED_WRONG,
+                    DECISION_ABSTAIN_LOW_SCORE,
+                )
+            )
+            differs = (
+                before.status != after.status
+                or before.accepted != after.accepted
+                or (threshold_acted and before.threshold != after.threshold)
+            )
+            if not differs:
+                continue
+            decision_changes.append(
+                DecisionChange(
+                    sample_id=sample_id,
+                    weight=after.weight,
+                    groups=after.groups,
+                    from_policy_version=earlier_version,
+                    to_policy_version=later_version,
+                    from_status=before.status,
+                    to_status=after.status,
+                    from_accepted=before.accepted,
+                    to_accepted=after.accepted,
+                    from_threshold=before.threshold,
+                    to_threshold=after.threshold,
+                )
+            )
+    n_policy_pairs = max(0, len(evaluations) - 1)
+    n_pair_samples = n_policy_pairs * len(sample_ids)
+
     comparison_version = content_version(
         [
-            ("holdout_sample_set_version", holdout_batch.sample_set.version),
+            ("holdout_sample_set_version", holdout_sample_set_version),
+            ("holdout_prediction_batch_version", holdout_prediction_batch_version),
             ("evaluations", [e.evaluation_version for e in evaluations]),
         ]
     )
     return PolicyComparison(
         comparison_version=comparison_version,
-        sample_set_version=holdout_batch.sample_set.version,
+        sample_set_version=holdout_sample_set_version,
+        prediction_batch_version=holdout_prediction_batch_version,
         evaluations=evaluations,
+        overall=overall_rows,
+        groups=tuple(group_rows),
+        unmet_constraints=tuple(unmet),
+        decision_changes=tuple(decision_changes),
+        n_changed_decisions=len(decision_changes),
+        n_unchanged_decisions=n_pair_samples - len(decision_changes),
     )
