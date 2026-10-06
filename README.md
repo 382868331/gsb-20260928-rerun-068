@@ -98,6 +98,53 @@ evaluation = evaluate_policy(per_group, holdout_batch)      # 独立核对
 comparison = compare_policies([per_group, uniform], holdout_batch)
 ```
 
+## 多重保护组约束下的策略选择研究
+
+`ml_eval/selection.py` 在**冻结留出集**与若干**已定版决策策略**之上做一次性
+的选择研究，只重放各策略的冻结决策（`evaluate_policy`），绝不重新拟合、
+不调整留出集、样本权重或判定阈值：
+
+- `SelectionConstraints` 同时声明三类限制：各组最低覆盖率
+  （单一数值或 `{组: 要求}`，`"*"` 为缺省）、受约束已知组之间的
+  `max_disparity`（最大覆盖率减最小覆盖率）与总体 `max_total_cost`；
+  三者必须同时满足，候选才算 `feasible`；
+- `run_selection_study(policies, holdout, constraints)` 对每个冻结策略在
+  同一份只读留出集上重放：一个样本属于多个组时各组覆盖率分别计入，
+  但总体成本与总体收益（正确接受权重 `benefit_weight`）每个样本只计一次；
+  `CandidateOutcome.violations` 逐条列出未满足的最低覆盖（含组与缺口）、
+  最大差异（含观测差异与最差/最好组）或成本上限（含超出量）；
+- 组标签缺失的样本保留为未知归属：`unknown_weight` 单独列示其权重去向，
+  绝不默认归入任何保护组或用来凑覆盖；显式约束的组在留出集上没有任何
+  已知成员时记 `group_absent_on_holdout`，不能默认满足；只缺某个属性但
+  属于其他保护组的样本仍正常计入其已知组；
+- 没有任何候选可行时研究 `feasible=False`，`infeasible_constraints`
+  汇总始终无法满足的组与限制以及全体候选能达到的最好水平，两种目标都
+  不做选择；不会通过改留出集或改阈值制造可行结果；
+- 两种目标并排冻结：`min_cost` 在可行候选中选总体加权代价最小者，
+  `worst_group_improvement` 选受约束组中最低覆盖率最大者（同值再按成本、
+  版本号确定地打破平局），二者可能选中不同策略；
+- 新策略到达只能以扩大的候选集合形成**新研究**（`study_version` 改变），
+  旧策略、样本权重、逐样本判定与旧研究保持冻结；`to_dict/from_dict`
+  按内容重算版本、篡改即拒绝载入；`recompute_study` 在重开后用冻结策略
+  与冻结留出集复算，结果（含违约明细与两种目标选择）必须逐项一致，
+  权重或判定改变即拒绝接受。
+
+```python
+from ml_eval import SelectionConstraints, run_selection_study, recompute_study
+
+constraints = SelectionConstraints(
+    min_coverage={"region=x": 0.5, "*": 0.2},
+    max_disparity=0.25,
+    max_total_cost=12.0,
+)
+study = run_selection_study([per_group, uniform], holdout_batch, constraints)
+if study.feasible:
+    cheapest = study.choice_for("min_cost").policy_version
+    fairest = study.choice_for("worst_group_improvement").policy_version
+reopened = StrategySelectionStudy.from_dict(saved)      # 版本校验
+same_study = recompute_study(reopened, policies, holdout_batch)  # 重开复算
+```
+
 ## 本地使用
 
 样本 CSV：`id,label,weight,g_<分组名>...`；预测 CSV：`id,predicted`。也支持 JSON。

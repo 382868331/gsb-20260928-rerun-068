@@ -22,6 +22,16 @@ from .policy import (
     evaluate_policy,
     fit_abstention_policy,
 )
+from .selection import (
+    CandidateOutcome,
+    OBJECTIVE_MIN_COST,
+    OBJECTIVE_WORST_GROUP,
+    ObjectiveChoice,
+    SelectionConstraints,
+    StrategySelectionStudy,
+    recompute_study,
+    run_selection_study,
+)
 
 __all__ = [
     "Sample",
@@ -50,6 +60,14 @@ __all__ = [
     "fit_abstention_policy",
     "evaluate_policy",
     "compare_policies",
+    "SelectionConstraints",
+    "CandidateOutcome",
+    "ObjectiveChoice",
+    "StrategySelectionStudy",
+    "OBJECTIVE_MIN_COST",
+    "OBJECTIVE_WORST_GROUP",
+    "run_selection_study",
+    "recompute_study",
 ]
 
 __version__ = "0.1.0"
