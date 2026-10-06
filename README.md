@@ -85,6 +85,30 @@ missing/conflicting/unknown_label 的权重去向，分组账目加总等于总�
 - 缺预测、冲突预测、未知类别按拒答计入人数、覆盖率、代价与 bootstrap
   区间；组间无重叠时分组账目加总等于总体账目。
 
+## 多重保护组约束下的策略选择研究
+
+`ml_eval/study.py` 在**冻结的核对资料**上对一组已定版（冻结）策略做
+可行性筛选与目标比较：
+
+- `run_policy_study(policies, holdout_batch, cost_cap, min_coverage,
+  max_disparity)`：只重放冻结策略（`evaluate_policy`），绝不重调阈值、
+  不改动留出集或样本权重；总体收益与代价每个样本只计一次，重叠保护组
+  分别计入各组账目；缺失分组标签的样本保留未知归属
+  （`属性=__unassigned__`），作为独立组参与约束核对，不会被默认归入
+  满足约束的一侧；
+- 约束：各组最低覆盖（单一数值或 `{组: 要求}`）、组间覆盖率最大差异
+  `max_disparity`、总体加权代价上限 `cost_cap`；约束冲突时每个策略的
+  `violations` 逐条列出无法满足的组与限制（缺口/超限大小），两种目标
+  都不做选择，不通过调整留出集或阈值制造可行结果；
+- 两种目标并排比较：`min_cost`（可行策略中总体代价最小）与
+  `worst_group`（最差组覆盖率最高，并列时取代价较小者），
+  `objective_comparison` 给出两种选择的代价与最差组覆盖；
+- 新策略到达只能形成新研究：把它加入候选列表重新运行得到新的
+  `study_version`，旧研究、旧策略与逐样本判定保持冻结可追溯；
+  `PolicyStudy.to_dict/from_dict` 保存重开后结果完全一致，
+  `study_version` 由内容重算校验，篡改即拒绝载入。
+
+
 ```python
 from ml_eval import (CostModel, PredictionBatch, fit_abstention_policy,
                      evaluate_policy, compare_policies)

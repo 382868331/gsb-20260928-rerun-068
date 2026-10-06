@@ -22,6 +22,12 @@ from .policy import (
     evaluate_policy,
     fit_abstention_policy,
 )
+from .study import (
+    ConstraintViolation,
+    PolicyAssessment,
+    PolicyStudy,
+    run_policy_study,
+)
 
 __all__ = [
     "Sample",
@@ -50,6 +56,10 @@ __all__ = [
     "fit_abstention_policy",
     "evaluate_policy",
     "compare_policies",
+    "ConstraintViolation",
+    "PolicyAssessment",
+    "PolicyStudy",
+    "run_policy_study",
 ]
 
 __version__ = "0.1.0"
